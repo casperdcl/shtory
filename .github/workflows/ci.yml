@@ -1,0 +1,13 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+    - name: deps
+      run: sudo apt-get update && sudo apt-get install -y shellcheck jq rsync openssh-client
+    - run: shellcheck -x shtory
+    - run: ./test.bash

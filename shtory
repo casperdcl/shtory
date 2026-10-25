@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+# shtory dependencies: jq, rsync, coreutils
+set -euo pipefail
+
+# --- helpers ---------------------------------------------------------------
+
+eff_host() { printf '%s' "${SHTORY_HOSTNAME:-$HOSTNAME}"; }
+
+hist_file() { printf '%s' "$HOME/.bash_history.$1.jsonl"; } # $1 = hostname
+
+# pipe stdin through a progress bar (tqdm CLI, if present, on a tty stderr);
+# passthrough otherwise. $1 = description.
+prog() {
+  if [[ -t 2 && ${SHTORY_NOPROGRESS:-} != 1 ]] && command -v tqdm >/dev/null 2>&1; then
+    tqdm --desc="${1:-}" --unit=rows --unit-scale --leave=False
+  else
+    cat
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+shtory <subcommand> [options]
+
+supercharge bash history: per-host logs with search & serverless sync.
+
+subcommands:
+  install
+          add hook & search keybinding to ~/.bashrc
+  uninstall
+          remove them again
+  help    this text
+  search [options] [<query>...]
+          interactive on a tty; see below for non-interactive options
+  hostname [<name>]
+          print (or set) the hostname shtory uses
+  sync [<host>...]
+	        sync histories with host(s) over ssh
+	        (default: detect hostnames from ~/.bash_history.*.jsonl filenames)
+  stats   per-host summary
+  compact <N>
+          deduplicate & cap each local history file to N lines
+
+search options:
+  -h, --hostname <host>   host to search (default: * = all hosts)
+  -c, --cwd               restrict to commands run in $PWD
+  -s, --sort <order>      newest (default) | oldest | count
+  -n, --limit <n>         max results (default 20 interactive, 1000 non-interactive)
+  -z, --zero              only commands with exit code 0
+  -Z, --nonzero           only commands with non-zero exit code
+EOF
+}
+
+# --- install / uninstall ----------------------------------------------------
+
+MARK_START='# >>> shtory >>>'
+MARK_END='# <<< shtory <<<'
+
+bashrc() { printf '%s' "${SHTORY_BASHRC:-$HOME/.bashrc}"; }
+
+# the block appended to ~/.bashrc (quoted heredoc: expanded only in the user's shell)
+hook_block() {
+  cat <<'EOF'
+
+# >>> shtory >>>
+__shtory_log() {
+  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re
+  re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
+  # something earlier in PROMPT_COMMAND (e.g. bash-preexec/bash-preprompt,
+  # as used by bashhub) may have clobbered $?; those save the last command's
+  # status in __bp_last_ret_value
+  h1=$(builtin history 1 2>/dev/null) || return 0
+  [[ $h1 =~ $re ]] || return 0
+  # a prompt can appear while the user's line is still in flight (input
+  # latency): history 1 then shows that unexecuted line with a stale status;
+  # skip it, it is logged at the next prompt. Also skip re-logged entries
+  # (bare Enter, or `history -r` re-reads resurfacing an old entry).
+  (( ${BASH_REMATCH[1]} > HISTCMD )) && return 0
+  cmd=${BASH_REMATCH[2]}
+  [[ ${BASH_REMATCH[1]}:$cmd == "${__shtory_last_logged-}" ]] && return 0
+  __shtory_last_logged="${BASH_REMATCH[1]}:$cmd"
+  if [[ -n ${SHTORY_SKIP-} ]] && [[ $cmd =~ ${SHTORY_SKIP} ]]; then
+    return 0
+  fi
+  esc=${cmd//\\/\\\\}
+  esc=${esc//\"/\\\"}
+  esc=${esc//$'\n'/\\n}
+  esc=${esc//$'\t'/\\t}
+  esc=${esc//$'\r'/\\r}
+  esc=${esc//[[:cntrl:]]/}
+  d=${PWD//\\/\\\\}
+  d=${d//\"/\\\"}
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl" 2>/dev/null
+  return 0
+}
+[[ $PROMPT_COMMAND == *__shtory_log* ]] || PROMPT_COMMAND="__shtory_log;${PROMPT_COMMAND-}"
+__shtory_pick() {
+  local sel
+  if sel=$(command shtory search "$@"); then
+    READLINE_LINE=$sel
+    READLINE_POINT=${#sel}
+  fi
+}
+if [[ $- == *i* ]]; then
+  bind -x "\"${SHTORY_KEY:-\\C-r}\": __shtory_pick"
+  _shtory() {
+    COMPREPLY=()
+    local sub prev cur w
+    if (( COMP_CWORD == 1 )); then
+      cur=${COMP_WORDS[1]}
+      COMPREPLY=($(compgen -W 'install uninstall search hostname sync stats compact help' -- "$cur"))
+      return 0
+    fi
+    sub=${COMP_WORDS[1]} prev=${COMP_WORDS[COMP_CWORD-1]} cur=${COMP_WORDS[COMP_CWORD]}
+    local -a hs=() f h
+    for f in "$HOME"/.bash_history.*.jsonl; do
+      h=${f##*/.bash_history.}; hs+=("${h%.jsonl}")
+    done
+    case $sub in
+      '')
+        COMPREPLY=($(compgen -W 'install uninstall search hostname sync stats compact help' -- "$cur"))
+        ;;
+      search)
+        case $prev in
+          -h|--hostname)
+            # no compgen here: a literal '*' in the word list would glob against cwd
+            local -a wl=(${hs[@]+"${hs[@]}"} '*' "${SHTORY_HOSTNAME:-$HOSTNAME}")
+            COMPREPLY=()
+            for w in "${wl[@]}"; do
+              [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
+            done
+            ;;
+          -s|--sort)     COMPREPLY=($(compgen -W 'newest oldest count' -- "$cur")) ;;
+          -*)            ;;
+          *)             COMPREPLY=($(compgen -W '-h --hostname -c --cwd -s --sort -n --limit -z --zero -Z --nonzero --' -- "$cur")) ;;
+        esac
+        ;;
+      sync)
+        COMPREPLY=()
+        for w in ${hs[@]+"${hs[@]}"}; do
+          [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
+        done
+        ;;
+    esac
+  }
+  complete -F _shtory shtory
+fi
+# <<< shtory <<<
+EOF
+}
+
+remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
+  local rc=$1 tmp
+  tmp=$(mktemp)
+  awk -v s="$MARK_START" -v e="$MARK_END" '$0==s{skip=1} $0==e{skip=0; next} !skip' "$rc" > "$tmp"
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
+}
+
+cmd_install() {
+  local rc
+  rc=$(bashrc)
+  if [[ -f $rc ]] && grep -qF "$MARK_START" "$rc"; then
+    remove_block "$rc"
+  fi
+  hook_block >> "$rc"
+  echo "shtory: block written to $rc — start a new shell (or source it)"
+}
+
+cmd_uninstall() {
+  local rcfile
+  rcfile=$(bashrc)
+  local found=0
+  if [[ -f $rc ]] && grep -qF "$MARK_START" "$rc"; then
+    remove_block "$rc"
+    found=1
+  fi
+  if [[ -f $rc ]] && grep -qF 'SHTORY_HOSTNAME=' "$rc"; then
+    local tmp
+    tmp=$(mktemp)
+    grep -vF 'SHTORY_HOSTNAME=' "$rc" > "$tmp" || true
+    cat "$tmp" > "$rc"
+    rm -f "$tmp"
+  fi
+  if [[ $found -eq 0 ]]; then
+    echo "shtory: no shtory block in $rcfile" >&2
+    return 1
+  fi
+  echo "shtory: block removed from $rcfile — start a new shell (or source it)"
+}
+
+# --- search -----------------------------------------------------------------
+
+host_of() { local f=$1; f=${f##*/.bash_history.}; printf '%s' "${f%.jsonl}"; }
+
+# shellcheck disable=SC2016 # the $vars below are jq's, evaluated by jq
+JQ_PROG=' # single quotes are load-bearing: the $vars are jq variables
+[ .[] | select(
+    # ascii_downcase both sides: the "i" flag of test() miscompiles in this jq build
+    (if $q == "" then true else ((.c | ascii_downcase) | test($q | ascii_downcase)) end)
+    and (if $d == "" then true else (.d == $d) end)
+    and (if $e == "zero" then .e == 0
+         elif $e == "nonzero" then .e != 0
+         else true end)
+  ) ]
+| ( if $o == "newest" then sort_by(-.t) | group_by(.c) | map(.[0]) | sort_by(-.t)
+    elif $o == "oldest" then sort_by(.t) | group_by(.c) | map(last) | sort_by(.t)
+    else group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
+  end )
+| .[0:$n]
+| .[]
+| (if $mode == "rows"
+   then .c + "\t" + .d + "\t" + (.e | tostring)
+         + "\t" + ((.t | todate | sub("T"; " ") | .[0:16])) + "\t" + .H
+   else .c end)
+'
+
+# stream: per-file tag (jq, skips malformed lines) -> progress -> filter/order/cap
+# args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
+query() {
+  local q=$1 mode=$2 f
+  {
+    for f in "${files[@]}"; do
+      jq -Rc --arg h "$(host_of "$f")" 'fromjson? | .H=$h' "$f"
+    done
+  } | prog search | jq -r -s \
+    --arg q "$q" --arg d "$cwd" --arg e "$efilter" \
+    --arg o "$order" --argjson n "$limit" --arg mode "$mode" "$JQ_PROG"
+}
+
+search_loop() {
+  local q sel out n
+  while :; do
+    printf 'shtory: pattern (regex, empty = all, q = quit): ' >&2
+    read -e -r q || return 1
+    [[ $q == [qQ] ]] && return 1
+    if ! out=$(query "$q" rows); then
+      printf 'search failed (bad regex?) — try again\n' >&2
+      continue
+    fi
+    if [[ -z $out ]]; then
+      printf 'no matches\n' >&2
+      continue
+    fi
+    local -a rows=()
+    mapfile -t rows <<< "$out"
+    for n in "${!rows[@]}"; do
+      printf ' %2d  %s\n' "$((n + 1))" "${rows[n]}" >&2
+    done
+    printf 'select [1-%d, q = quit]: ' "${#rows[@]}" >&2
+    read -e -r sel || return 1
+    [[ $sel == [qQ]* ]] && return 1
+    if [[ $sel =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#rows[@]} )); then
+      printf '%s\n' "${rows[sel - 1]%%$'\t'*}"
+      return 0
+    fi
+  done
+}
+
+cmd_search() {
+  local host='*' cwd='' order=newest limit='' efilter='' q=''
+  local -a files=() query_words=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -h|--hostname) host=${2:?}; shift 2 ;;
+      -c|--cwd) cwd=$PWD; shift ;;
+      -s|--sort) order=${2:?}; shift 2 ;;
+      -n|--limit) limit=${2:?}; shift 2 ;;
+      -z|--zero) efilter=zero; shift ;;
+      -Z|--nonzero) efilter=nonzero; shift ;;
+      --) shift; while [[ $# -gt 0 ]]; do query_words+=("$1"); shift; done ;;
+      -*) echo "shtory: unknown search option: $1" >&2; return 2 ;;
+      *) query_words+=("$1"); shift ;;
+    esac
+  done
+  case $order in newest|oldest|count) ;; *) echo "shtory: bad --sort: $order" >&2; return 2 ;; esac
+  if [[ -n $limit && ! $limit =~ ^[0-9]+$ ]]; then
+    echo "shtory: bad --limit: $limit" >&2; return 2
+  fi
+  q=${query_words[*]-}
+
+  local -a files=()
+  local f h
+  shopt -s nullglob
+  for f in "$HOME"/.bash_history.*.jsonl; do
+    h=${f##*/.bash_history.}; h=${h%.jsonl}
+    # shellcheck disable=SC2053 # $host is a glob pattern on purpose
+    [[ $h == $host ]] && files+=("$f")
+  done
+  shopt -u nullglob
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "shtory: no history files for host '$host'" >&2
+    return 1
+  fi
+
+  local interactive=0
+  if [[ -t 0 && -z $q ]]; then interactive=1; fi
+  if [[ -z $limit ]]; then
+    limit=$(( interactive ? 20 : 1000 ))
+  fi
+
+  if [[ $interactive -eq 1 ]]; then
+    if command -v fzf >/dev/null 2>&1; then
+      local sel_row
+      if ! sel_row=$(query '' rows | fzf); then
+        return 1
+      fi
+      printf '%s\n' "${sel_row%%$'\t'*}"
+      return 0
+    fi
+    search_loop
+  else
+    query "$q" cmd
+  fi
+}
+cmd_hostname() {
+  if [[ $# -eq 0 ]]; then
+    echo "${SHTORY_HOSTNAME:-$HOSTNAME}"
+    return 0
+  fi
+  if [[ $# -gt 1 ]]; then
+    echo "shtory: usage: shtory hostname [<host>]" >&2
+    return 2
+  fi
+  local name=$1 rc line tmp
+  if [[ ! $name =~ ^[A-Za-z0-9._-]+$ ]]; then
+    echo "shtory: invalid hostname: $name" >&2
+    return 2
+  fi
+  rcfile=$(bashrc)
+  line="export SHTORY_HOSTNAME=$name"
+  tmp=$(mktemp)
+  grep -vF 'SHTORY_HOSTNAME=' "$rc" > "$tmp" || true
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
+  printf '%s\n' "$line" >> "$rc"
+  echo "shtory: $line written to $rc"
+}
+# --- sync -------------------------------------------------------------------
+
+# host "exists in ~/.ssh/config" iff ssh -G resolves it to a different hostname
+ssh_config_host() {
+  local h=$1 hn
+  hn=$(ssh -G "$h" 2>/dev/null | awk '$1 == "hostname" {print $2}')
+  [[ -n $hn && $hn != "$h" ]]
+}
+
+sync_host() {
+  local h=$1 tmpdir=$2 f base
+  local -a push=()
+  shopt -s nullglob
+
+  if ! rsync -zaPu "$h:~/.bash_history.*.jsonl" "$tmpdir/" 2>/dev/null; then
+    echo "shtory: $h: pull found nothing (or unreachable)" >&2
+    shopt -u nullglob
+    return 0
+  fi
+  for f in "$tmpdir"/.bash_history.*.jsonl; do
+    [[ -f $f ]] || continue
+    base=${f##*/}
+    if [[ -f "$HOME/$base" ]]; then
+      { cat "$HOME/$base" "$f"; } | prog "merge $h" \
+        | jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]' \
+        > "$tmpdir/$base.merged" || { echo "shtory: $h: merge of $base failed" >&2; continue; }
+      cat "$tmpdir/$base.merged" > "$HOME/$base"
+      rm -f "$tmpdir/$base" "$tmpdir/$base.merged"
+    else
+      mv "$f" "$HOME/$base"
+    fi
+  done
+
+  for f in "$HOME"/.bash_history.*.jsonl; do
+    base=${f##*/}
+    [[ $base == ".bash_history.$h.jsonl" ]] && continue
+    push+=("$f")
+  done
+  shopt -u nullglob
+  if [[ ${#push[@]} -gt 0 ]]; then
+    rsync -zaPu -- "${push[@]}" "$h:~/" || echo "shtory: $h: push failed" >&2
+  fi
+  echo "shtory: $h: synced"
+}
+
+cmd_sync() {
+  local -a hosts=()
+  local h f b
+  if [[ $# -gt 0 ]]; then
+    hosts=("$@")
+  else
+    shopt -s nullglob
+    for f in "$HOME"/.bash_history.*.jsonl; do
+      b=${f##*/.bash_history.}; b=${b%.jsonl}
+      hosts+=("$b")
+    done
+    shopt -u nullglob
+  fi
+  if [[ ${#hosts[@]} -eq 0 ]]; then
+    echo "shtory: no hosts to sync (no local history files, no args)" >&2
+    return 1
+  fi
+
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "${tmpdir-}"' RETURN
+
+  for h in "${hosts[@]}"; do
+    if ! ssh_config_host "$h"; then
+      echo "shtory: skipping '$h' (not in ~/.ssh/config)" >&2
+      continue
+    fi
+    sync_host "$h" "$tmpdir"
+  done
+  trap - RETURN
+  rm -rf "$tmpdir"
+}
+
+cmd_stats() {
+  local f host
+  shopt -s nullglob
+  for f in "$HOME"/.bash_history.*.jsonl; do
+    host=${f##*/.bash_history.}; host=${host%.jsonl}
+    jq -Rc --arg h "$host" '[. , inputs | fromjson? | select(. != null)]
+      | {host: $h, commands: length,
+         first: (if length then (map(.t) | min | todate) else null end),
+         last: (if length then (map(.t) | max | todate) else null end),
+         failed: ([.[] | select(.e != 0)] | length)}' "$f" || continue
+  done
+  shopt -u nullglob
+}
+
+cmd_compact() {
+  local n=${1-} f
+  if [[ $# -ne 1 || ! $n =~ ^[0-9]+$ ]]; then
+    echo "shtory: usage: shtory compact <N>" >&2
+    return 2
+  fi
+  shopt -s nullglob
+  for f in "$HOME"/.bash_history.*.jsonl; do
+    if prog "compact" < "$f" \
+      | jq -Rc --argjson n "$n" '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(-.t) | .[0:$n] | sort_by(.t) | .[]' \
+      > "$f.tmp"; then
+      mv "$f.tmp" "$f"
+    else
+      rm -f "$f.tmp"
+    fi
+  done
+  shopt -u nullglob
+}
+
+# --- dispatch ---------------------------------------------------------------
+
+main() {
+  local sub=${1:-help}
+  shift || true
+  case $sub in
+    install)   cmd_install "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    search)    cmd_search "$@" ;;
+    hostname)  cmd_hostname "$@" ;;
+    sync)      cmd_sync "$@" ;;
+    stats)     cmd_stats "$@" ;;
+    compact)   cmd_compact "$@" ;;
+    help|--help) usage ;;
+    *) usage >&2; return 2 ;;
+  esac
+}
+
+main "$@"
