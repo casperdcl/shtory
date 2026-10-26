@@ -66,6 +66,17 @@ assert_eq "pipeline captured whole" "echo a | grep a" "$(jq -r 'select(.c == "ec
 assert_eq "cwd captured" "/tmp" "$(jq -r 'select(.c == "echo hi") | .d' "$F")"
 assert_eq "quoting/backslash escaped" 'printf '\''q"uote and \back\slash'\''' "$(jq -r 'select(.c | contains("q\"uote")) | .c' "$F")"
 
+echo "# tui filter"
+shtory_fn() { bash -c "source \"$B\" >/dev/null 2>&1; $*"; }
+assert_eq "word-substring filter" "git status" \
+  "$(shtory_fn "search_tui_filter 'git s' 'git status' 'git diff' 'ls'")"
+assert_eq "empty filter passes all" $'a\nb' \
+  "$(shtory_fn "search_tui_filter '' 'a' 'b'")"
+assert_eq "case-insensitive" "git status" \
+  "$(shtory_fn "search_tui_filter 'GIT S' 'git status'")"
+assert_eq "words must be in order" "" \
+  "$(shtory_fn "search_tui_filter 'status git' 'git status'")"
+
 echo "# search"
 S=$T/searchhome; D=$T/work; mkdir -p "$S" "$D"
 cat > "$S/.bash_history.hostA.jsonl" <<EOF

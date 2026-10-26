@@ -38,7 +38,7 @@ shtory search [options] [<query>...]
 - `-h`, `--hostname <HOST>`: glob filter by host (default `*`)
 - `-c`, `--cwd`: filter to current path (`$PWD`)
 - `-s`, `--sort <ORDER>`: `newest` (default), `oldest`, `count` (most common)
-- `-n`, `--limit <N>`: max results (default 20 interactive, 1000 non-interactive)
+- `-n`, `--limit <N>`: max results (default 100 interactive, 1000 non-interactive)
 - `-z`, `--zero` / `-Z`, `--nonzero`: exit code filter
 
 `query`:

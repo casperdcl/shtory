@@ -45,7 +45,7 @@ search options:
   -h, --hostname <host>   host to search (default: * = all hosts)
   -c, --cwd               restrict to commands run in $PWD
   -s, --sort <order>      newest (default) | oldest | count
-  -n, --limit <n>         max results (default 20 interactive, 1000 non-interactive)
+  -n, --limit <n>         max results (default 100 interactive, 1000 non-interactive)
   -z, --zero              only commands with exit code 0
   -Z, --nonzero           only commands with non-zero exit code
 EOF
@@ -245,7 +245,7 @@ search_loop() {
     local -a rows=()
     mapfile -t rows <<< "$out"
     for n in "${!rows[@]}"; do
-      printf ' %2d  %s\n' "$((n + 1))" "${rows[n]}" >&2
+      printf ' %2d  %s\n' "$((n + 1))" "${rows[n]//$'\t'/  }" >&2
     done
     printf 'select [1-%d, q = quit]: ' "${#rows[@]}" >&2
     read -e -r sel || return 1
@@ -255,6 +255,160 @@ search_loop() {
       return 0
     fi
   done
+}
+
+# case-insensitive word filter: every word of $1 must occur in the line, in
+# order. Prints the matching lines (empty $1 passes everything).
+search_tui_filter() {
+  local line w lw f ok
+  for line in "${@:2}"; do
+    f=${line,,}; ok=1
+    for w in $1; do  # shellcheck disable=SC2086 # word splitting intended
+      lw=${w,,}
+      if [[ $f != *"$lw"* ]]; then
+        ok=0; break
+      fi
+      f=${f#*"$lw"}
+    done
+    if (( ok )); then
+      printf '%s\n' "$line"
+    fi
+  done
+}
+
+# minimal fzf-style picker, pure bash, no alt-screen: type to filter,
+# arrows to move (left/right scroll horizontally), enter to select,
+# esc to cancel. Prints the selected line to stdout.
+search_tui() {
+  local items=("$@") filter='' sel=0 hx=0 key line rc=1
+  local cols lines m h n start maxl prev_exit size d k2 k3 r c1 tail b w n1
+  # no alt-screen here: plain CUP/ED only, so terminals without ?1049 support
+  # still get a working (if flickering) picker
+  if size=$(stty size < /dev/tty 2>/dev/null); then
+    lines=${size% *}; cols=${size#* }
+  else
+    cols=$(tput cols 2>/dev/null) || cols=80
+    lines=$(tput lines 2>/dev/null) || lines=24
+  fi
+  [[ $lines =~ ^[0-9]+$ ]] || lines=24
+  [[ $cols =~ ^[0-9]+$ ]] || cols=80
+  if (( lines < 8 )); then lines=8; fi
+  if (( cols < 22 )); then cols=22; fi
+  # every row is padded to exactly cols - 1 characters (one column of slack
+  # against a +/-1 winsize error): no wrap, no stale tails, and no \e[K,
+  # which Termux mishandles on pending-wrap lines (termux-app#3549). Rows
+  # end in \r\n: in raw mode a bare \n is a line-feed without CR.
+  m=$(( cols - 1 ))
+  h=$(( lines - 2 ))
+  # raw + no-echo; tty state and the caller's EXIT trap are restored below
+  if ! stty raw -echo < /dev/tty > /dev/null 2>&1; then
+    return 1
+  fi
+  prev_exit=$(trap -p EXIT)
+  trap 'stty -raw echo < /dev/tty 2>/dev/null' EXIT
+  trap 'stty -raw echo < /dev/tty 2>/dev/null; exit 1' INT
+  while :; do
+    local -a shown=()
+    while IFS= read -r line; do
+      shown+=("$line")
+    done < <(search_tui_filter "$filter" "${items[@]}")
+    if (( sel >= ${#shown[@]} )); then
+      if (( ${#shown[@]} > 0 )); then
+        sel=$(( ${#shown[@]} - 1 ))
+      else
+        sel=0
+      fi
+    fi
+    start=$(( sel > h - 1 ? sel - h + 1 : 0 ))
+    maxl=0
+    for n in "${!shown[@]}"; do
+      d=${shown[n]//$'\t'/  }
+      if (( ${#d} > maxl )); then
+        maxl=${#d}
+      fi
+    done
+    if (( hx > maxl - (m - 1) )); then
+      hx=$(( maxl > m - 1 ? maxl - (m - 1) : 0 ))
+    fi
+    { printf '\e[H\e[J'
+      printf ' %-*s\r\n' "$(( m - 1 ))" "${filter:0:m-1}"
+      for n in "${!shown[@]}"; do
+        if (( n < start || n >= start + h )); then
+          continue
+        fi
+        # first field (command) plain, second column onwards dim
+        r=${shown[n]}
+        if [[ $r == *$'\t'* ]]; then
+          c1=${r%%$'\t'*}
+          tail=${r#*$'\t'}
+          d=$c1"  "${tail//$'\t'/  }
+          b=${#c1}
+        else
+          d=${r//$'\t'/  }
+          b=''
+        fi
+        w=$(( m - 1 ))
+        if [[ -z $b ]] || (( hx + w <= b )); then
+          if (( n == sel )); then
+            printf '\e[7m %-*s\e[0m\r\n' "$w" "${d:hx:w}"
+          else
+            printf ' %-*s\r\n' "$w" "${d:hx:w}"
+          fi
+        elif (( hx >= b )); then
+          if (( n == sel )); then
+            printf ' \e[7;2m%-*s\e[0m\r\n' "$w" "${d:hx:w}"
+          else
+            printf ' \e[2m%-*s\e[0m\r\n' "$w" "${d:hx:w}"
+          fi
+        else
+          n1=$(( b - hx ))
+          if (( n == sel )); then
+            printf '\e[7m %s\e[7;2m%-*s\e[0m\r\n' "${d:hx:n1}" "$(( w - n1 ))" "${d:hx+n1}"
+          else
+            printf ' %s\e[2m%-*s\e[0m\r\n' "${d:hx:n1}" "$(( w - n1 ))" "${d:hx+n1}"
+          fi
+        fi
+      done; } > /dev/tty
+    if ! read -rs -N 1 key < /dev/tty; then
+      rc=1; break
+    fi
+    if [[ $key == $'\x1b' ]]; then
+      # arrows arrive as 3-byte CSI sequences; read exactly one so a fast
+      # next keystroke is not swallowed into this one
+      if IFS= read -rs -N 1 -t 0.02 k2 < /dev/tty; then
+        if [[ $k2 == '[' || $k2 == 'O' ]]; then
+          IFS= read -rs -N 1 -t 0.02 k3 < /dev/tty && key+=$k2$k3
+        else
+          key=$'\x1b'
+        fi
+      fi
+    fi
+    case $key in
+      $'\x1b[A' | $'\x1bOA')
+        if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
+      $'\x1b[B' | $'\x1bOB')
+        if (( sel < ${#shown[@]} - 1 )); then sel=$(( sel + 1 )); fi ;;
+      $'\x1b[D' | $'\x1bOD')
+        if (( hx > 0 )); then hx=$(( hx - 1 )); fi ;;
+      $'\x1b[C' | $'\x1bOC')
+        if (( hx < maxl - (m - 1) )); then hx=$(( hx + 1 )); fi ;;
+      $'\x7f' | $'\b') filter=${filter%?} ;;
+      $'\x1b') rc=1; break ;;
+      $'\n' | $'\r')
+        if [[ -n ${shown[sel]-} ]]; then
+          printf '%s\n' "${shown[sel]}"
+          rc=0
+        fi
+        break ;;
+      *) if [[ ${key:0:1} != [[:cntrl:]] ]]; then filter+=$key; fi ;;
+    esac
+  done
+  if [[ -n $prev_exit ]]; then
+    eval "$prev_exit"
+  else
+    trap - EXIT
+  fi
+  return $rc
 }
 
 cmd_search() {
@@ -296,13 +450,21 @@ cmd_search() {
   local interactive=0
   if [[ -t 0 && -z $q ]]; then interactive=1; fi
   if [[ -z $limit ]]; then
-    limit=$(( interactive ? 20 : 1000 ))
+    limit=$(( interactive ? 100 : 1000 ))
   fi
-
   if [[ $interactive -eq 1 ]]; then
+    local sel_row
     if command -v fzf >/dev/null 2>&1; then
-      local sel_row
       if ! sel_row=$(query '' rows | fzf); then
+        return 1
+      fi
+      printf '%s\n' "${sel_row%%$'\t'*}"
+      return 0
+    fi
+    if : > /dev/tty 2>/dev/null; then
+      local -a rows=()
+      mapfile -t rows < <(query '' rows)
+      if ! sel_row=$(search_tui "${rows[@]}"); then
         return 1
       fi
       printf '%s\n' "${sel_row%%$'\t'*}"
