@@ -106,11 +106,21 @@ assert_eq "-c cwd filter" $'grep -E \'a|b\' conf.yml\nmake build\ngit status' \
 assert_eq "-s count, top is dup" "git status" "$(run -h hostA -s count | head -1)"
 assert_eq "-s oldest -n 2" $'git status\nmake build' "$(run -h hostA -s oldest -n 2)"
 assert_eq "-n 1 across hosts" "make test" "$(run -h '*' -n 1)"
+assert_eq "-n 0 = no limit" $'grep -E \'a|b\' conf.yml\ntail -f app.log\nmake build\ngit status' "$(run -h hostA -n 0)"
 assert_eq "regex query" "make build" "$(run -h hostA 'make .*')"
 run -h hostA '([' >/dev/null 2>&1; rc=$?
 [[ $rc -ne 0 ]] && ok "bad regex nonzero rc" || bad "bad regex nonzero rc"
 run -h nosuch >/dev/null 2>&1; assert_rc "missing host rc 1" 1 $?
 out=$(HOME=$S "$B" search -h hostA 'nope' 2>/dev/null); assert_eq "no match empty" "" "$out"
+cat > "$S/.bash_history.hostT.jsonl" <<EOF
+{"t":1,"d":"$S","e":0,"c":"in-home"}
+{"t":2,"d":"$S/sub","e":0,"c":"in-sub"}
+{"t":3,"d":"$S-x","e":0,"c":"in-sibling"}
+EOF
+rows(){ HOME=$S shtory_fn "cwd= efilter= order=newest limit=1000 files=(\"$S/.bash_history.hostT.jsonl\"); query '$1' rows"; }
+assert_eq "path: home itself is ~" $'in-home\t~\t0\t1970-01-01 00:00\thostT' "$(rows in-home)"
+assert_eq "path: home prefix is ~/" $'in-sub\t~/sub\t0\t1970-01-01 00:00\thostT' "$(rows in-sub)"
+assert_eq "path: sibling prefix untouched" $'in-sibling\t'"$S-x"$'\t0\t1970-01-01 00:00\thostT' "$(rows in-sibling)"
 
 echo "# hostname"
 assert_eq "prints effective host" "${SHTORY_HOSTNAME:-$HOSTNAME}" "$(HOME=$S "$B" hostname)"

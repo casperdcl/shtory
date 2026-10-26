@@ -45,7 +45,7 @@ search options:
   -h, --hostname <host>   host to search (default: * = all hosts)
   -c, --cwd               restrict to commands run in $PWD
   -s, --sort <order>      newest (default) | oldest | count
-  -n, --limit <n>         max results (default 100 interactive, 1000 non-interactive)
+  -n, --limit <n>         max results (0 = no limit; default: 9999 in the TUI fallback, 0 (unlimited) otherwise)
   -z, --zero              only commands with exit code 0
   -Z, --nonzero           only commands with non-zero exit code
 EOF
@@ -195,6 +195,11 @@ host_of() { local f=$1; f=${f##*/.bash_history.}; printf '%s' "${f%.jsonl}"; }
 
 # shellcheck disable=SC2016 # the $vars below are jq's, evaluated by jq
 JQ_PROG=' # single quotes are load-bearing: the $vars are jq variables
+# show $HOME as ~ in the path column (only a full path component prefix)
+def tilde: if $home == "" then .
+  elif . == $home then "~"
+  elif startswith($home + "/") then "~" + .[($home | length):]
+  else . end;
 [ .[] | select(
     # ascii_downcase both sides: the "i" flag of test() miscompiles in this jq build
     (if $q == "" then true else ((.c | ascii_downcase) | test($q | ascii_downcase)) end)
@@ -207,10 +212,10 @@ JQ_PROG=' # single quotes are load-bearing: the $vars are jq variables
     elif $o == "oldest" then sort_by(.t) | group_by(.c) | map(last) | sort_by(.t)
     else group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
   end )
-| .[0:$n]
+| (if $n == 0 then . else .[0:$n] end)
 | .[]
 | (if $mode == "rows"
-   then .c + "\t" + .d + "\t" + (.e | tostring)
+   then .c + "\t" + (.d | tilde) + "\t" + (.e | tostring)
          + "\t" + ((.t | todate | sub("T"; " ") | .[0:16])) + "\t" + .H
    else .c end)
 '
@@ -225,7 +230,8 @@ query() {
     done
   } | prog search | jq -r -s \
     --arg q "$q" --arg d "$cwd" --arg e "$efilter" \
-    --arg o "$order" --argjson n "$limit" --arg mode "$mode" "$JQ_PROG"
+    --arg o "$order" --argjson n "$limit" --arg mode "$mode" \
+    --arg home "$HOME" "$JQ_PROG"
 }
 
 search_loop() {
@@ -450,7 +456,13 @@ cmd_search() {
   local interactive=0
   if [[ -t 0 && -z $q ]]; then interactive=1; fi
   if [[ -z $limit ]]; then
-    limit=$(( interactive ? 100 : 1000 ))
+    # the pure-bash interactive picker (TUI/loop) filters O(rows) per
+    # keystroke, so it stays capped; fzf and non-interactive are unlimited
+    if [[ $interactive -eq 1 && ! $(command -v fzf) ]]; then
+      limit=9999
+    else
+      limit=0
+    fi
   fi
   if [[ $interactive -eq 1 ]]; then
     local sel_row
