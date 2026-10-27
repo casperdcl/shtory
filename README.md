@@ -72,17 +72,19 @@ shtory hostname [<host>]
 Sync histories across multiple systems over `ssh`.
 
 ```bash
-shtory sync [--compact <N>] [--self] [<host>...]
+shtory sync [--compact <n>] [--self] [<remote host>...]
 ```
 
-Pulls every host, merges differences (`jq` union), then pushes.
+Pulls every remote host, merges differences (`jq` union), then pushes.
 
-- `--self`: don't avoid overwriting a host's own history file with any local copy of it
-- `--compact <N>`: after pulling & merging, `compact` each file before pushing (implies `--self`)
+- `--self`: don't avoid overwriting a remote host's own history file with any local copy of it
+- `--compact <n>`: after pulling & merging, `compact` each file before pushing (implies `--self`)
 
-`host`:
-- when unspecified, detect host(s) via `~/.bash_history.*.jsonl` names
-- corresponding hostnames should exist in `~/.ssh/config`
+`remote host`:
+
+- when unspecified, auto-detect remote host(s) via `~/.bash_history.*.jsonl` names
+- a corresponding hostname should exist in `~/.ssh/config`
+  - :warning: this should match the remote host's own `shtory hostname`, otherwise auto-detection won't work correctly
 
 ## stats
 

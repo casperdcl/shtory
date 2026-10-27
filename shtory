@@ -398,14 +398,14 @@ sync_merge() {
   done
 }
 
-# push local files to $1; $2 = 1 to include $1's own file
+# push local files to $1; $2 = the name $1 reports for its own file; $3 = 1 to include it
 sync_push() {
-  local h=$1 self=$2 f base
+  local h=$1 name=$2 self=$3 f base
   local -a push=()
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
     base=${f##*/}
-    if [[ $base == ".bash_history.$h.jsonl" && $self -ne 1 ]]; then
+    if [[ $base == ".bash_history.$name.jsonl" && $self -ne 1 ]]; then
       continue
     fi
     push+=("$f")
@@ -449,11 +449,15 @@ cmd_sync() {
   trap 'rm -rf "${tmpdir-}"' RETURN
 
   local -a pulled=() f
+  declare -A name_of=()
   for h in "${hosts[@]}"; do
     if ! ssh_config_host "$h"; then
       echo "shtory: skipping '$h' (not in ~/.ssh/config)" >&2
       continue
     fi
+    # name reported by host itself; may differ from ssh alias
+    name_of[$h]=$(ssh "$h" "bash -c 'printf %s \${SHTORY_HOSTNAME:-\$HOSTNAME}'" 2>/dev/null)
+    name_of[$h]=${name_of[$h]:-$h}
     sync_pull "$h" "$tmpdir/$h" && pulled+=("$h")
   done
   if [[ ${#pulled[@]} -eq 0 ]]; then
@@ -469,8 +473,12 @@ cmd_sync() {
     shopt -u nullglob
   fi
   for h in "${pulled[@]}"; do
-    sync_push "$h" "$self"
-    echo "shtory: $h: synced"
+    sync_push "$h" "${name_of[$h]}" "$self"
+    if [[ ${name_of[$h]} != "$h" ]]; then
+      echo "shtory: $h: synced (as ${name_of[$h]})"
+    else
+      echo "shtory: $h: synced"
+    fi
   done
 }
 

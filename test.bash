@@ -161,6 +161,12 @@ if [[ ${1:-} == -G ]]; then
   fi
   exit 0
 fi
+h=$1
+if [[ -n ${FAKE_HOSTNAMES:-} ]] && grep -q "^$h " "$FAKE_HOSTNAMES"; then
+  awk -v h="$h" '$1 == h {print $2}' "$FAKE_HOSTNAMES"
+  exit 0
+fi
+printf '%s\n' "$h"
 exit 0
 EOF
 cat > "$SHIM/rsync" <<'EOF'
@@ -278,6 +284,24 @@ assert_eq "sync: own file not pushed by default" $'{"t":10,"d":"/x","e":0,"c":"s
 ) >/dev/null 2>&1
 assert_eq "sync --self: own file pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
   "$(cat "$R4/.bash_history.hostY.jsonl")"
+
+# sync: host's reported name differs from the ssh alias
+L5=$T/name_home; R5=$T/name_remote
+mkdir -p "$L5" "$R5/alx"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L5/.bash_history.realhost.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R5/alx/.bash_history.realhost.jsonl"
+printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L5/.bash_history.other2.jsonl"
+printf 'alx\n' > "$T/ssh_hosts6"
+printf 'alx realhost\n' > "$T/hostnames"
+(
+  HOME=$L5 FAKE_REMOTE=$R5 FAKE_SSH_HOSTS=$T/ssh_hosts6 FAKE_HOSTNAMES=$T/hostnames PATH="$SHIM:$PATH" \
+  "$B" sync alx
+) >/dev/null 2>&1
+assert_eq "name mismatch: own file (by reported name) not pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}' \
+  "$(cat "$R5/alx/.bash_history.realhost.jsonl")"
+assert_eq "name mismatch: local merged" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
+  "$(cat "$L5/.bash_history.realhost.jsonl")"
+[[ -f $R5/alx/.bash_history.other2.jsonl ]] && ok "name mismatch: other files still pushed" || bad "name mismatch: other files still pushed"
 
 echo "# result"
 if [[ $FAILS -eq 0 ]]; then
