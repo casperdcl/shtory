@@ -6,7 +6,7 @@ Supercharge bash history.
 - interactive search
 - serverless sync via `ssh`
 
-All in a single 500 line bash script.
+All in a pure bash script.
 
 ## Subcommands
 
@@ -16,6 +16,7 @@ Place on `$PATH` and install:
 
 ```bash
 curl -fsSLo ~/.local/bin/shtory https://raw.githubusercontent.com/casperdcl/shtory/main/shtory
+curl -fsSLo ~/.local/bin/tui-shtory https://raw.githubusercontent.com/casperdcl/shtory/main/tui-shtory
 shtory install
 ```
 
@@ -38,15 +39,15 @@ shtory search [options] [<query>...]
 
 - `-h`, `--hostname <HOST>`: glob filter by host (default `*`)
 - `-c`, `--cwd`: filter to current path (`$PWD`)
-- `-s`, `--sort <ORDER>`: `newest` (default), `oldest`, `count` (most common)
-- `-n`, `--limit <N>`: max results default: 9999 in TUI fallback, 0 (unlimited) otherwise
+- `-s`, `--sort <order>`: `newest` (default), `oldest`, `count` (most common)
+- `-n`, `--limit <n>`: max results default: 9999 in `tui-shtory`, 0 (unlimited) otherwise
 - `-z`, `--zero` / `-Z`, `--nonzero`: exit code filter
 
 `query`:
 
 - case-insensitive PCRE
 - on TTY with no query, search is interactive
-  + using `fzf` if available
+  + using `fzf` if available; bundled `tui-shtory` otherwise
 
 > [!NOTE]
 > <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc`:

@@ -2,6 +2,7 @@
 # No TTY required
 set -uo pipefail
 B=$PWD/shtory
+TUI=$PWD/tui-shtory
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
 FAILS=0
@@ -15,9 +16,13 @@ assert_rc(){ # desc expected_rc actual_rc
 }
 
 echo "# syntax & lint"
-if bash -n "$B"; then ok "bash -n"; else bad "bash -n"; fi
+for f in "$B" "$TUI"; do
+  if bash -n "$f"; then ok "bash -n ${f##*/}"; else bad "bash -n ${f##*/}"; fi
+done
 if command -v shellcheck >/dev/null 2>&1; then
-  if shellcheck -x "$B"; then ok "shellcheck"; else bad "shellcheck"; fi
+  for f in "$B" "$TUI"; do
+    if shellcheck -x "$f"; then ok "shellcheck ${f##*/}"; else bad "shellcheck ${f##*/}"; fi
+  done
 else
   echo "SKIP - shellcheck not installed"
 fi
@@ -68,14 +73,15 @@ assert_eq "quoting/backslash escaped" 'printf '\''q"uote and \back\slash'\''' "$
 
 echo "# tui filter"
 shtory_fn() { bash -c "source \"$B\" >/dev/null 2>&1; $*"; }
+tui_fn() { bash -c "source \"$TUI\" >/dev/null 2>&1; $*"; }
 assert_eq "word-substring filter" "git status" \
-  "$(shtory_fn "search_tui_filter 'git s' 'git status' 'git diff' 'ls'")"
+  "$(tui_fn "tui_filter 'git s' 'git status' 'git diff' 'ls'")"
 assert_eq "empty filter passes all" $'a\nb' \
-  "$(shtory_fn "search_tui_filter '' 'a' 'b'")"
+  "$(tui_fn "tui_filter '' 'a' 'b'")"
 assert_eq "case-insensitive" "git status" \
-  "$(shtory_fn "search_tui_filter 'GIT S' 'git status'")"
+  "$(tui_fn "tui_filter 'GIT S' 'git status'")"
 assert_eq "words must be in order" "" \
-  "$(shtory_fn "search_tui_filter 'status git' 'git status'")"
+  "$(tui_fn "tui_filter 'status git' 'git status'")"
 
 echo "# search"
 S=$T/searchhome; D=$T/work; mkdir -p "$S" "$D"
