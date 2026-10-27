@@ -4,12 +4,7 @@ set -euo pipefail
 
 # --- helpers ---------------------------------------------------------------
 
-eff_host() { printf '%s' "${SHTORY_HOSTNAME:-$HOSTNAME}"; }
-
-hist_file() { printf '%s' "$HOME/.bash_history.$1.jsonl"; } # $1 = hostname
-
-# pipe stdin through a progress bar (tqdm CLI, if present, on a tty stderr);
-# passthrough otherwise. $1 = description.
+# optional stdin pipe progress
 prog() {
   if [[ -t 2 && ${SHTORY_NOPROGRESS:-} != 1 ]] && command -v tqdm >/dev/null 2>&1; then
     tqdm --desc="${1:-}" --unit=rows --unit-scale --leave=False
@@ -66,15 +61,13 @@ hook_block() {
 __shtory_log() {
   local ec=${__bp_last_ret_value-$?} h1 cmd esc d re
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
-  # something earlier in PROMPT_COMMAND (e.g. bash-preexec/bash-preprompt,
-  # as used by bashhub) may have clobbered $?; those save the last command's
-  # status in __bp_last_ret_value
+  # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
   [[ $h1 =~ $re ]] || return 0
-  # a prompt can appear while the user's line is still in flight (input
-  # latency): history 1 then shows that unexecuted line with a stale status;
-  # skip it, it is logged at the next prompt. Also skip re-logged entries
-  # (bare Enter, or `history -r` re-reads resurfacing an old entry).
+  # prompt appearing while user typing (input latency):
+  # history 1 shows unexecuted line with stale status;
+  # skip it (logged at the next prompt).
+  # Also skip re-logged entries (bare Enter, `history -r` re-reads resurfacing an old entry).
   (( ${BASH_REMATCH[1]} > HISTCMD )) && return 0
   cmd=${BASH_REMATCH[2]}
   [[ ${BASH_REMATCH[1]}:$cmd == "${__shtory_last_logged-}" ]] && return 0
@@ -157,6 +150,15 @@ remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
   rm -f "$tmp"
 }
 
+# rewrite $1 in place (preserving permissions), dropping lines matching $2
+strip_line() {
+  local rc=$1 pat=$2 tmp
+  tmp=$(mktemp)
+  grep -vF "$pat" "$rc" > "$tmp" || true
+  cat "$tmp" > "$rc"
+  rm -f "$tmp"
+}
+
 cmd_install() {
   local rc
   rc=$(bashrc)
@@ -171,16 +173,9 @@ cmd_uninstall() {
   local rcfile
   rcfile=$(bashrc)
   local found=0
-  if [[ -f $rc ]] && grep -qF "$MARK_START" "$rc"; then
-    remove_block "$rc"
+  if [[ -f $rcfile ]] && grep -qF "$MARK_START" "$rcfile"; then
+    remove_block "$rcfile"
     found=1
-  fi
-  if [[ -f $rc ]] && grep -qF 'SHTORY_HOSTNAME=' "$rc"; then
-    local tmp
-    tmp=$(mktemp)
-    grep -vF 'SHTORY_HOSTNAME=' "$rc" > "$tmp" || true
-    cat "$tmp" > "$rc"
-    rm -f "$tmp"
   fi
   if [[ $found -eq 0 ]]; then
     echo "shtory: no shtory block in $rcfile" >&2
@@ -193,9 +188,8 @@ cmd_uninstall() {
 
 host_of() { local f=$1; f=${f##*/.bash_history.}; printf '%s' "${f%.jsonl}"; }
 
-# shellcheck disable=SC2016 # the $vars below are jq's, evaluated by jq
-JQ_PROG=' # single quotes are load-bearing: the $vars are jq variables
-# show $HOME as ~ in the path column (only a full path component prefix)
+# shellcheck disable=SC2016 # $vars for jq
+JQ_PROG='
 def tilde: if $home == "" then .
   elif . == $home then "~"
   elif startswith($home + "/") then "~" + .[($home | length):]
@@ -220,7 +214,6 @@ def tilde: if $home == "" then .
    else .c end)
 '
 
-# stream: per-file tag (jq, skips malformed lines) -> progress -> filter/order/cap
 # args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
 query() {
   local q=$1 mode=$2 f
@@ -237,7 +230,7 @@ query() {
 search_loop() {
   local q sel out n
   while :; do
-    printf 'shtory: pattern (regex, empty = all, q = quit): ' >&2
+    printf 'shtory: pattern (regex, empty=all, q=quit): ' >&2
     read -e -r q || return 1
     [[ $q == [qQ] ]] && return 1
     if ! out=$(query "$q" rows); then
@@ -253,7 +246,7 @@ search_loop() {
     for n in "${!rows[@]}"; do
       printf ' %2d  %s\n' "$((n + 1))" "${rows[n]//$'\t'/  }" >&2
     done
-    printf 'select [1-%d, q = quit]: ' "${#rows[@]}" >&2
+    printf 'select [1-%d, q=quit]: ' "${#rows[@]}" >&2
     read -e -r sel || return 1
     [[ $sel == [qQ]* ]] && return 1
     if [[ $sel =~ ^[0-9]+$ ]] && (( sel >= 1 && sel <= ${#rows[@]} )); then
@@ -263,8 +256,7 @@ search_loop() {
   done
 }
 
-# case-insensitive word filter: every word of $1 must occur in the line, in
-# order. Prints the matching lines (empty $1 passes everything).
+# case-insensitive in-order word filter (empty $1 passes everything)
 search_tui_filter() {
   local line w lw f ok
   for line in "${@:2}"; do
@@ -282,9 +274,9 @@ search_tui_filter() {
   done
 }
 
-# minimal fzf-style picker, pure bash, no alt-screen: type to filter,
-# arrows to move (left/right scroll horizontally), enter to select,
-# esc to cancel. Prints the selected line to stdout.
+# minimal fzf-style picker, pure bash: type to filter, arrows to move
+# (left/right scroll horizontally), enter to select, esc to cancel.
+# Prints the selected line to stdout.
 search_tui() {
   local items=("$@") filter='' sel=0 hx=0 key line rc=1
   local cols lines m h n start maxl prev_exit size d k2 k3 r c1 tail b w n1
@@ -305,8 +297,8 @@ search_tui() {
   # which Termux mishandles on pending-wrap lines (termux-app#3549). Rows
   # end in \r\n: in raw mode a bare \n is a line-feed without CR.
   m=$(( cols - 1 ))
+  w=$(( m - 1 ))
   h=$(( lines - 2 ))
-  # raw + no-echo; tty state and the caller's EXIT trap are restored below
   if ! stty raw -echo < /dev/tty > /dev/null 2>&1; then
     return 1
   fi
@@ -333,11 +325,11 @@ search_tui() {
         maxl=${#d}
       fi
     done
-    if (( hx > maxl - (m - 1) )); then
-      hx=$(( maxl > m - 1 ? maxl - (m - 1) : 0 ))
+    if (( hx > maxl - w )); then
+      hx=$(( maxl > w ? maxl - w : 0 ))
     fi
     { printf '\e[H\e[J'
-      printf ' %-*s\r\n' "$(( m - 1 ))" "${filter:0:m-1}"
+      printf ' %-*s\r\n' "$w" "${filter:0:m-1}"
       for n in "${!shown[@]}"; do
         if (( n < start || n >= start + h )); then
           continue
@@ -353,7 +345,6 @@ search_tui() {
           d=${r//$'\t'/  }
           b=''
         fi
-        w=$(( m - 1 ))
         if [[ -z $b ]] || (( hx + w <= b )); then
           if (( n == sel )); then
             printf '\e[7m %-*s\e[0m\r\n' "$w" "${d:hx:w}"
@@ -397,7 +388,7 @@ search_tui() {
       $'\x1b[D' | $'\x1bOD')
         if (( hx > 0 )); then hx=$(( hx - 1 )); fi ;;
       $'\x1b[C' | $'\x1bOC')
-        if (( hx < maxl - (m - 1) )); then hx=$(( hx + 1 )); fi ;;
+        if (( hx < maxl - w )); then hx=$(( hx + 1 )); fi ;;
       $'\x7f' | $'\b') filter=${filter%?} ;;
       $'\x1b') rc=1; break ;;
       $'\n' | $'\r')
@@ -418,7 +409,7 @@ search_tui() {
 }
 
 cmd_search() {
-  local host='*' cwd='' order=newest limit='' efilter='' q=''
+  local host='*' cwd='' order=newest limit='' efilter='' q='' f h
   local -a files=() query_words=()
   while [[ $# -gt 0 ]]; do
     case $1 in
@@ -439,12 +430,10 @@ cmd_search() {
   fi
   q=${query_words[*]-}
 
-  local -a files=()
-  local f h
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
-    h=${f##*/.bash_history.}; h=${h%.jsonl}
-    # shellcheck disable=SC2053 # $host is a glob pattern on purpose
+    h=$(host_of "$f")
+    # shellcheck disable=SC2053 # $host glob pattern intended
     [[ $h == $host ]] && files+=("$f")
   done
   shopt -u nullglob
@@ -487,6 +476,7 @@ cmd_search() {
     query "$q" cmd
   fi
 }
+
 cmd_hostname() {
   if [[ $# -eq 0 ]]; then
     echo "${SHTORY_HOSTNAME:-$HOSTNAME}"
@@ -496,20 +486,18 @@ cmd_hostname() {
     echo "shtory: usage: shtory hostname [<host>]" >&2
     return 2
   fi
-  local name=$1 rc line tmp
+  local name=$1 rcfile line
   if [[ ! $name =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "shtory: invalid hostname: $name" >&2
     return 2
   fi
   rcfile=$(bashrc)
   line="export SHTORY_HOSTNAME=$name"
-  tmp=$(mktemp)
-  grep -vF 'SHTORY_HOSTNAME=' "$rc" > "$tmp" || true
-  cat "$tmp" > "$rc"
-  rm -f "$tmp"
-  printf '%s\n' "$line" >> "$rc"
-  echo "shtory: $line written to $rc"
+  strip_line "$rcfile" 'SHTORY_HOSTNAME='
+  printf '%s\n' "$line" >> "$rcfile"
+  echo "shtory: $line written to $rcfile"
 }
+
 # --- sync -------------------------------------------------------------------
 
 # host "exists in ~/.ssh/config" iff ssh -G resolves it to a different hostname
@@ -557,19 +545,18 @@ sync_host() {
 
 cmd_sync() {
   local -a hosts=()
-  local h f b
+  local h f
   if [[ $# -gt 0 ]]; then
     hosts=("$@")
   else
     shopt -s nullglob
     for f in "$HOME"/.bash_history.*.jsonl; do
-      b=${f##*/.bash_history.}; b=${b%.jsonl}
-      hosts+=("$b")
+      hosts+=("$(host_of "$f")")
     done
     shopt -u nullglob
   fi
   if [[ ${#hosts[@]} -eq 0 ]]; then
-    echo "shtory: no hosts to sync (no local history files, no args)" >&2
+    echo "shtory: no hosts to sync (no local history files & no args)" >&2
     return 1
   fi
 
@@ -584,15 +571,13 @@ cmd_sync() {
     fi
     sync_host "$h" "$tmpdir"
   done
-  trap - RETURN
-  rm -rf "$tmpdir"
 }
 
 cmd_stats() {
   local f host
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
-    host=${f##*/.bash_history.}; host=${host%.jsonl}
+    host=$(host_of "$f")
     jq -Rc --arg h "$host" '[. , inputs | fromjson? | select(. != null)]
       | {host: $h, commands: length,
          first: (if length then (map(.t) | min | todate) else null end),

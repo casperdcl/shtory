@@ -6,13 +6,13 @@ Supercharge bash history.
 - interactive search
 - serverless sync via `ssh`
 
-All in under 500 lines in single bash script.
+All in a single 500 line bash script.
 
 ## Subcommands
 
 ### install / update
 
-Drop inside `$PATH` and install:
+Place on `$PATH` and install:
 
 ```bash
 curl -fsSLo ~/.local/bin/shtory https://raw.githubusercontent.com/casperdcl/shtory/main/shtory
@@ -22,9 +22,10 @@ shtory install
 This appends a `shtory` block to `~/.bashrc`.
 
 > [!TIP]
-> To skip logging any commamds matching a regex, add to `~/.bashrc`:
+> To skip logging any commands matching a regex, use `SHTORY_SKIP`; e.g. add to `~/.bashrc`:
+>
 > ```bash
-> export SHTORY_SKIP='passw|secret'
+> export SHTORY_SKIP='export .*(KEY|TOKEN).*=.+'
 > ```
 
 ### search
@@ -38,7 +39,7 @@ shtory search [options] [<query>...]
 - `-h`, `--hostname <HOST>`: glob filter by host (default `*`)
 - `-c`, `--cwd`: filter to current path (`$PWD`)
 - `-s`, `--sort <ORDER>`: `newest` (default), `oldest`, `count` (most common)
-- `-n`, `--limit <N>`: max results (default 100 interactive, 1000 non-interactive)
+- `-n`, `--limit <N>`: max results default: 9999 in TUI fallback, 0 (unlimited) otherwise
 - `-z`, `--zero` / `-Z`, `--nonzero`: exit code filter
 
 `query`:
@@ -46,6 +47,13 @@ shtory search [options] [<query>...]
 - case-insensitive PCRE
 - on TTY with no query, search is interactive
   + using `fzf` if available
+
+> [!NOTE]
+> <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc`:
+>
+> ```bash
+> export SHTORY_KEY='\C-r'
+> ```
 
 ### hostname
 
@@ -87,11 +95,11 @@ shtory compact <n>
 
 ## Alternatives
 
-| tool | storage | sync | search | notes |
-|---|---|---|---|---|
-| bashhub | cloud DB (server) | built-in | web + `bh` CLI | the inspiration; needs an account, history leaves your machine |
-| atuin | SQLite | E2EE (server or key) | TUI, FTS, scopes | most featureful; binary + server, heaviest footprint |
-| hstr | plain `.bash_history` | none | TUI, frequency/recency ranking | great suggest-box, but records no context (no exit code, cwd or time) |
-| hishtory | SQLite | E2EE via sops | SQL queries | context-rich, but Rust binary + sops/sops-server setup |
-| McFly | SQLite | built-in (encrypted) | neural-ranked ctrl-r | polished, but binary + sync server |
-| **shtory** | **per-host JSONL** | **rsync over ssh** | **interactive, jq/regex** | **one bash file, no binaries, no server, no keys to exchange; history never leaves your own machines** |
+tool | storage | sync | search | notes
+-- | -- | -- | -- | --
+[![shtory](https://img.shields.io/github/stars/casperdcl/shtory?label=shtory)](https://github.com/casperdcl/shtory) | **per-host JSONL** | **serverless** `rsync` over **ssh** | TUI | **one bash file, no web auth, history never leaves your own machines**
+[![bashhub](https://img.shields.io/github/stars/rcaloras/bashhub-client?label=bashhub)](https://github.com/rcaloras/bashhub-client) | unknown ([closed-source](https://github.com/rcaloras/bashhub-client/issues/47)) | built-in | basic, [10k limit](https://github.com/rcaloras/bashhub-client/issues/118) | python client
+[![atuin](https://img.shields.io/github/stars/atuinsh/atuin?label=atuin)](https://github.com/atuinsh/atuin) | SQLite | E2EE | TUI, FTS, scopes | binary + server
+[![hstr](https://img.shields.io/github/stars/dvorka-oss/hstr?label=hstr)](https://github.com/dvorka-oss/hstr) | `.bash_history` | none | TUI | no context (exit code/cwd/time)
+[![hishtory](https://img.shields.io/github/stars/ddworken/hishtory?label=hishtory)](https://github.com/ddworken/hishtory) | SQLite | SOPS E2EE | SQL | binary + server
+[![McFly](https://img.shields.io/github/stars/cantino/mcfly?label=McFly)](https://github.com/cantino/mcfly) | SQLite | none | neural-ranked
