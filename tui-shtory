@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tui-shtory: minimal interactive picker in pure bash (drop-in replacement for fzf)
+# SPDX-License-Identifier: MPL-2.0
+# tui-shtory: vibe-coded interactive picker in pure bash (drop-in fallback if fzf isn't installed)
 #
 # Reads candidate lines from stdin, shows them in a full-screen TUI on
 # /dev/tty, prints the selected line to stdout.
