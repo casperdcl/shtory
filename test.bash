@@ -49,6 +49,7 @@ assert_eq "uninstall preserves rest" "echo kept" "$(head -1 "$RC")"
 
 echo "# hook logging"
 H=$T/home; mkdir -p "$H"
+printf 'PROMPT_COMMAND=(foo bar)\n' > "$H/.bashrc" # shtory must keep these entries (bash 5.1+ array)
 SHTORY_BASHRC=$H/.bashrc "$B" install >/dev/null
 cat > "$T/hook.sh" <<'EOF'
 echo hi
@@ -56,16 +57,18 @@ false
 echo a | grep a
 printf 'q"uote and \back\slash'
 secret_cmd here
+printf '\nPC:%s\n' "${PROMPT_COMMAND[*]}"
 EOF
 (
   cd /tmp || exit 1
   umask 022 # so the 0600 assertion is not vacuous
-  HOME=$H SHTORY_HOSTNAME=testhost SHTORY_SKIP='secret_cmd' TERM=dumb \
-    bash -i < "$T/hook.sh" >/dev/null 2>&1
+  HOME=$H SHTORY_HOSTNAME=testhost SHTORY_SKIP='secret_cmd|PC' TERM=dumb \
+    bash -i < "$T/hook.sh" > "$T/hook_out" 2>/dev/null
 )
 F=$H/.bash_history.testhost.jsonl
 [[ -f $F ]] && ok "history file created" || bad "history file created"
 [[ $(stat -c %a "$F") == 600 ]] && ok "history file mode 600" || bad "history file mode 600 ($(stat -c %a "$F"))"
+assert_eq "PROMPT_COMMAND array entries kept" "PC:__shtory_log foo bar" "$(grep '^PC:' "$T/hook_out")"
 assert_eq "4 commands logged (secret skipped)" "4" "$(wc -l < "$F")"
 jq -e 'has("t") and has("d") and has("e") and has("c")' "$F" >/dev/null 2>&1 && ok "all lines valid JSON" || bad "all lines valid JSON"
 assert_eq "exit code captured" "1" "$(jq -r 'select(.c == "false") | .e' "$F")"

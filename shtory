@@ -93,7 +93,12 @@ __shtory_log() {
   printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
-[[ $PROMPT_COMMAND == *__shtory_log* ]] || PROMPT_COMMAND="__shtory_log;${PROMPT_COMMAND-}"
+if [[ ${PROMPT_COMMAND-} == *__shtory_log* ]]; then :;
+elif (( ${#PROMPT_COMMAND[@]} > 1 )); then
+  PROMPT_COMMAND=(__shtory_log ${PROMPT_COMMAND[@]+"${PROMPT_COMMAND[@]}"})
+else
+  PROMPT_COMMAND="__shtory_log;${PROMPT_COMMAND-}"
+fi
 __shtory_pick() {
   local sel
   if sel=$(command shtory search "$@"); then
