@@ -29,10 +29,11 @@ subcommands:
           interactive on a tty; see below for non-interactive options
   hostname [<name>]
           print (or set) the hostname shtory uses
-  sync [--self] [<host>...]
-	        sync histories with host(s) over ssh
-	        (default: detect hostnames from ~/.bash_history.*.jsonl filenames)
-	    --self: also push each host's own file
+  sync [--compact <n>] [--self] [<hostname>...]
+	  sync histories with host(s) over ssh
+	  (default: detect host(s) from ~/.bash_history.*.jsonl filenames)
+      --self: also overwrite each host's own history file with the local synced copy
+      --compact <N>: while syncing, run compact (implies --self)
   stats   per-host summary
   compact <N>
           deduplicate & cap each local history file to N lines
@@ -135,7 +136,7 @@ if [[ $- == *i* ]]; then
       sync)
         COMPREPLY=()
         if [[ $cur == -* ]]; then
-          COMPREPLY=($(compgen -W '--self' -- "$cur"))
+          COMPREPLY=($(compgen -W '--compact --self' -- "$cur"))
         else
           for w in ${hs[@]+"${hs[@]}"}; do
             [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
@@ -417,14 +418,20 @@ sync_push() {
 
 cmd_sync() {
   local -a hosts=()
-  local h f self=0
+  local h f cap='' self=0
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --compact) cap=${2:?}; shift 2 ;;
       --self) self=1; shift ;;
       -*) echo "shtory: unknown sync option: $1" >&2; return 2 ;;
       *) hosts+=("$1"); shift ;;
     esac
   done
+  if [[ -n $cap && ! $cap =~ ^[0-9]+$ ]]; then
+    echo "shtory: bad --compact: $cap" >&2
+    return 2
+  fi
+  [[ -n $cap ]] && self=1 # --compact implies --self
   if [[ ${#hosts[@]} -eq 0 ]]; then
     shopt -s nullglob
     for f in "$HOME"/.bash_history.*.jsonl; do
@@ -454,6 +461,13 @@ cmd_sync() {
   fi
 
   sync_merge "$tmpdir"
+  if [[ -n $cap ]]; then
+    shopt -s nullglob
+    for f in "$HOME"/.bash_history.*.jsonl; do
+      compact_file "$f" "$cap"
+    done
+    shopt -u nullglob
+  fi
   for h in "${pulled[@]}"; do
     sync_push "$h" "$self"
     echo "shtory: $h: synced"
@@ -475,6 +489,17 @@ cmd_stats() {
 }
 
 # dedupe + cap $1 (a history file) to the newest $2 lines
+compact_file() {
+  local f=$1 n=$2
+  if prog "compact" < "$f" \
+    | jq -Rc --argjson n "$n" '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[ ((length - $n) as $s | if $s < 0 then 0 else $s end) : ] | .[]' \
+    > "$f.tmp"; then
+    mv "$f.tmp" "$f"
+  else
+    rm -f "$f.tmp"
+  fi
+}
+
 cmd_compact() {
   local n=${1-} f
   if [[ $# -ne 1 || ! $n =~ ^[0-9]+$ ]]; then
@@ -483,13 +508,7 @@ cmd_compact() {
   fi
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
-    if prog "compact" < "$f" \
-      | jq -Rc --argjson n "$n" '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(-.t) | .[0:$n] | sort_by(.t) | .[]' \
-      > "$f.tmp"; then
-      mv "$f.tmp" "$f"
-    else
-      rm -f "$f.tmp"
-    fi
+    compact_file "$f" "$n"
   done
   shopt -u nullglob
 }

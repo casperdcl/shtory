@@ -239,6 +239,26 @@ assert_eq "multi-host: mC got mB's new line" $'{"t":1,"d":"/x","e":0,"c":"b1"}\n
 assert_eq "multi-host: local merged everything" $'{"t":1,"d":"/x","e":0,"c":"a1"}\n{"t":2,"d":"/x","e":0,"c":"a2"}' \
   "$(cat "$MH/.bash_history.mA.jsonl")"
 
+# sync --compact
+L3=$T/cp_home; R3=$T/cp_remote
+mkdir -p "$L3" "$R3"
+printf '%s\n' '{"t":100,"d":"/a","e":0,"c":"old1"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/a","e":0,"c":"new"}' > "$L3/.bash_history.hostX.jsonl"
+printf '%s\n' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/a","e":0,"c":"new"}' '{"t":500,"d":"/a","e":0,"c":"remote-new"}' > "$R3/.bash_history.hostX.jsonl"
+printf '%s\n' '{"t":50,"d":"/z","e":0,"c":"local-only"}' > "$L3/.bash_history.other.jsonl"
+printf 'hostX\n' > "$T/ssh_hosts3"
+(
+  HOME=$L3 FAKE_REMOTE=$R3 FAKE_SSH_HOSTS=$T/ssh_hosts3 PATH="$SHIM:$PATH" \
+  "$B" sync --compact 2 hostX
+) >/dev/null 2>&1
+assert_eq "sync --compact: merged then capped to newest N" $'{"t":400,"d":"/a","e":0,"c":"new"}\n{"t":500,"d":"/a","e":0,"c":"remote-new"}' \
+  "$(cat "$L3/.bash_history.hostX.jsonl")"
+assert_eq "sync --compact: push carries compacted files" '{"t":50,"d":"/z","e":0,"c":"local-only"}' \
+  "$(cat "$R3/.bash_history.other.jsonl")"
+assert_eq "sync --compact implies --self: own file pushed compacted" $'{"t":400,"d":"/a","e":0,"c":"new"}\n{"t":500,"d":"/a","e":0,"c":"remote-new"}' \
+  "$(cat "$R3/.bash_history.hostX.jsonl")"
+HOME=$L3 "$B" sync --compact abc hostX >/dev/null 2>&1; assert_rc "sync --compact bad N rc 2" 2 $?
+HOME=$L3 "$B" sync --compact >/dev/null 2>&1; assert_rc "sync --compact requires N" 1 $?
+
 # sync --self
 L4=$T/self_home; R4=$T/self_remote
 mkdir -p "$L4" "$R4"
