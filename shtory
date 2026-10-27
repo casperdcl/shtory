@@ -63,7 +63,10 @@ hook_block() {
 
 # >>> shtory >>>
 __shtory_log() {
-  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re
+  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re f
+  f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  # creation mode 0600
+  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
@@ -87,7 +90,7 @@ __shtory_log() {
   esc=${esc//[[:cntrl:]]/}
   d=${PWD//\\/\\\\}
   d=${d//\"/\\\"}
-  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl" 2>/dev/null
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
 [[ $PROMPT_COMMAND == *__shtory_log* ]] || PROMPT_COMMAND="__shtory_log;${PROMPT_COMMAND-}"

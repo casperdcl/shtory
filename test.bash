@@ -59,11 +59,13 @@ secret_cmd here
 EOF
 (
   cd /tmp || exit 1
+  umask 022 # so the 0600 assertion is not vacuous
   HOME=$H SHTORY_HOSTNAME=testhost SHTORY_SKIP='secret_cmd' TERM=dumb \
     bash -i < "$T/hook.sh" >/dev/null 2>&1
 )
 F=$H/.bash_history.testhost.jsonl
 [[ -f $F ]] && ok "history file created" || bad "history file created"
+[[ $(stat -c %a "$F") == 600 ]] && ok "history file mode 600" || bad "history file mode 600 ($(stat -c %a "$F"))"
 assert_eq "4 commands logged (secret skipped)" "4" "$(wc -l < "$F")"
 jq -e 'has("t") and has("d") and has("e") and has("c")' "$F" >/dev/null 2>&1 && ok "all lines valid JSON" || bad "all lines valid JSON"
 assert_eq "exit code captured" "1" "$(jq -r 'select(.c == "false") | .e' "$F")"
