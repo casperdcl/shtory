@@ -184,6 +184,9 @@ if [[ ${#args[@]} -eq 3 && ${args[1]} == *:* ]]; then
     [[ -e $f ]] || continue
     cp "$f" "$dest/" && n=$((n + 1))
   done
+  if [[ -n ${FAKE_RSYNC_PARTIAL:-} ]] && grep -qx "$h" "$FAKE_RSYNC_PARTIAL"; then
+    exit 23
+  fi
   exit $((n == 0))
 fi
 i=0
@@ -307,6 +310,21 @@ assert_eq "name mismatch: own file (by reported name) not pushed" $'{"t":10,"d":
 assert_eq "name mismatch: local merged" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
   "$(cat "$L5/.bash_history.realhost.jsonl")"
 [[ -f $R5/alx/.bash_history.other2.jsonl ]] && ok "name mismatch: other files still pushed" || bad "name mismatch: other files still pushed"
+
+# sync: partial pull (rsync 23) merges what arrived, with a warning
+L6=$T/partial_home; R6=$T/partial_remote
+mkdir -p "$L6" "$R6/part"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-extra"}' > "$L6/.bash_history.part.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-extra"}' > "$R6/part/.bash_history.part.jsonl"
+printf 'part\n' > "$T/ssh_hosts7"
+printf 'part\n' > "$T/partial_hosts"
+out=$(
+  HOME=$L6 FAKE_REMOTE=$R6 FAKE_SSH_HOSTS=$T/ssh_hosts7 FAKE_RSYNC_PARTIAL=$T/partial_hosts PATH="$SHIM:$PATH" \
+  "$B" sync part 2>&1
+)
+assert_eq "partial pull: merged what arrived" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-extra"}\n{"t":30,"d":"/x","e":0,"c":"local-extra"}' \
+  "$(cat "$L6/.bash_history.part.jsonl")"
+[[ $out == *"pull incomplete (rsync 23)"* ]] && ok "partial pull: warned" || bad "partial pull: warned ($out)"
 
 echo "# result"
 if [[ $FAILS -eq 0 ]]; then

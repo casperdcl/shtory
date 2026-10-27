@@ -374,9 +374,15 @@ ssh_config_host() {
 
 # pull all of $1's history files into $2 (a per-host dir)
 sync_pull() {
-  local h=$1 dest=$2
+  local h=$1 dest=$2 rc=0
   mkdir -p "$dest"
-  if rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" 2>/dev/null; then
+  rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" 2>/dev/null || rc=$?
+  if (( rc == 0 )); then
+    return 0
+  fi
+  # 23/24/30: partial transfer; merge what arrived and warn
+  if (( rc == 23 || rc == 24 || rc == 30 )) && compgen -G "$dest/.bash_history.*.jsonl" >/dev/null; then
+    echo "shtory: $h: pull incomplete (rsync $rc) - merged what arrived" >&2
     return 0
   fi
   echo "shtory: $h: pull found nothing (or unreachable)" >&2
