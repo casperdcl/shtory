@@ -217,8 +217,13 @@ def tilde: if $home == "" then .
   elif . == $home then "~"
   elif startswith($home + "/") then "~" + .[($home | length):]
   else . end;
-[ .[] | select(
-    # ascii_downcase both sides: the "i" flag of test() miscompiles in this jq build
+[ . , inputs
+  | fromjson? | select(. != null)
+  # host from the filename .bash_history.<host>.jsonl;
+  # avoid (possibly jq version unsupported) named captures in sub templates
+  | .H = (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; ""))
+  | select(
+    # ascii_downcase both sides: test(...;"i") miscompiles in some jq versions
     (if $q == "" then true else ((.c | ascii_downcase) | test($q | ascii_downcase)) end)
     and (if $d == "" then true else (.d == $d) end)
     and (if $e == "zero" then .e == 0
@@ -239,15 +244,12 @@ def tilde: if $home == "" then .
 
 # args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
 query() {
-  local q=$1 mode=$2 f
-  {
-    for f in "${files[@]}"; do
-      jq -Rc --arg h "$(host_of "$f")" 'fromjson? | .H=$h' "$f"
-    done
-  } | prog search | jq -r -s \
+  local q=$1 mode=$2 msg='search'
+  command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
+  jq -Rr \
     --arg q "$q" --arg d "$cwd" --arg e "$efilter" \
     --arg o "$order" --argjson n "$limit" --arg mode "$mode" \
-    --arg home "$HOME" "$JQ_PROG"
+    --arg home "$HOME" "$JQ_PROG" "${files[@]}" | prog "$msg"
 }
 
 search_loop() {
