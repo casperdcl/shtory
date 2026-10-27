@@ -37,7 +37,8 @@ Interactively search for past commands.
 shtory search [options] [<query>...]
 ```
 
-- `-h`, `--hostname <HOST>`: glob filter by host (default `*`)
+- `-h`, `--hostname <name>`: glob filter by host (default `*`)
+- `-H`, `--localhost`: filter to current machine
 - `-c`, `--cwd`: filter to current path (`$PWD`)
 - `-s`, `--sort <order>`: `newest` (default), `oldest`, `count` (most common)
 - `-n`, `--limit <n>`: max results default: 9999 in `tui-shtory`, 0 (unlimited) otherwise

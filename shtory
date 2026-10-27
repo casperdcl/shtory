@@ -37,7 +37,8 @@ subcommands:
           deduplicate & cap each local history file to N lines
 
 search options:
-  -h, --hostname <host>   pattern, default: '*' (all hosts)
+  -h, --hostname <name>   pattern, default: '*' (all hosts)
+  -H, --localhost         same as -h="${SHTORY_HOSTNAME:-$HOSTNAME}"
   -c, --cwd               only commands run in $PWD
   -s, --sort <order>      newest (default)/oldest/count
   -n, --limit <n>         max results, default: 9999 in tui-shtory fallback, 0 (unlimited) otherwise
@@ -127,7 +128,7 @@ if [[ $- == *i* ]]; then
             ;;
           -s|--sort)     COMPREPLY=($(compgen -W 'newest oldest count' -- "$cur")) ;;
           -*)            ;;
-          *)             COMPREPLY=($(compgen -W '-h --hostname -c --cwd -s --sort -n --limit -z --zero -Z --nonzero --' -- "$cur")) ;;
+          *)             COMPREPLY=($(compgen -W '-h --hostname -H --localhost -c --cwd -s --sort -n --limit -z --zero -Z --nonzero --' -- "$cur")) ;;
         esac
         ;;
       sync)
@@ -264,6 +265,7 @@ cmd_search() {
   while [[ $# -gt 0 ]]; do
     case $1 in
       -h|--hostname) host=${2:?}; shift 2 ;;
+      -H|--localhost) host=${SHTORY_HOSTNAME:-$HOSTNAME}; shift ;;
       -c|--cwd) cwd=$PWD; shift ;;
       -s|--sort) order=${2:?}; shift 2 ;;
       -n|--limit) limit=${2:?}; shift 2 ;;

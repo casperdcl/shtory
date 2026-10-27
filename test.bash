@@ -103,6 +103,8 @@ run(){ HOME=$S "$B" search "$@"; }
 assert_eq "default host is all" "git status" "$(run git)"
 assert_eq "glob lap-* (excl. laptop, desktop-personal)" $'cmd-on-lap-01\ncmd-on-lap-top' "$(run -h 'lap-*')"
 assert_eq "glob host*" $'make test\nmake build' "$(run -h 'host*' make)"
+assert_eq "-H = -h local host" "git status" "$(SHTORY_HOSTNAME=hostA run -H git)"
+assert_eq "--localhost" "git status" "$(SHTORY_HOSTNAME=hostA run --localhost git)"
 assert_eq "query, deduped" "git status" "$(run -h hostA git)"
 assert_eq "case-insensitive" "git status" "$(run -h hostA GIT)"
 assert_eq "-Z all hosts, newest first" $'make test\nmake build' "$(run -h '*' -Z)"
