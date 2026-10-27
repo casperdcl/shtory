@@ -90,10 +90,10 @@ Pulls every remote host, merges differences (`jq` union), then pushes.
 
 ## stats
 
-Per-host command count, time ranges, nonzero exit count.
+Per-host command count, time ranges, nonzero exit count; or the most frequent commands/dirs.
 
 ```bash
-shtory stats
+shtory stats [--cmd <n>] [--dir <n>]
 ```
 
 ## compact

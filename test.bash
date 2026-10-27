@@ -143,6 +143,13 @@ assert_rc "invalid name rc 2" 2 $?
 echo "# stats / compact"
 assert_eq "stats hostA" '{"host":"hostA","commands":5,"first":"1970-01-01T00:16:40Z","last":"1970-01-01T00:23:20Z","failed":1}' \
   "$(HOME=$S "$B" stats | grep hostA)"
+printf '%s\n' \
+  '{"t":1,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":2,"d":"/uniquedir1","e":0,"c":"zzztop"}' \
+  '{"t":3,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":4,"d":"/uniquedir1","e":1,"c":"qqq"}' \
+  '{"t":5,"d":"/uniquedir2","e":0,"c":"qqq"}' > "$S/.bash_history.hostS.jsonl"
+assert_eq "stats --cmd 2" $'3\tzzztop\n2\tgit status' "$(HOME=$S "$B" stats --cmd 2)"
+assert_eq "stats --dir 1" $'5\t/x' "$(HOME=$S "$B" stats --dir 1)"
+HOME=$S "$B" stats --cmd x >/dev/null 2>&1; assert_rc "stats bad --cmd rc 2" 2 $?
 for i in $(seq 1 15); do
   printf '{"t":%s,"d":"/z","e":0,"c":"filler %s"}\n' "$((60 + i))" "$i" >> "$S/.bash_history.hostB.jsonl"
 done

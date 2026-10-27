@@ -34,9 +34,11 @@ subcommands:
 	  sync histories with host(s) over ssh
 	  (default: detect host(s) from ~/.bash_history.*.jsonl filenames)
       --self: also overwrite each host's own history file with the local synced copy
-      --compact <N>: while syncing, run compact (implies --self)
-  stats   per-host summary
-  compact <N>
+      --compact <n>: while syncing, run compact (implies --self)
+  stats [--cmd <n>] [--dir <n>]
+          per-host summary
+      --cmd, --dir: most frequent commands/dirs
+  compact <n>
           deduplicate & cap each local history file to N lines
 
 search options:
@@ -151,6 +153,9 @@ if [[ $- == *i* ]]; then
             [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
           done
         fi
+        ;;
+      stats)
+        COMPREPLY=($(compgen -W '--cmd --dir' -- "$cur"))
         ;;
     esac
   }
@@ -498,17 +503,61 @@ cmd_sync() {
 }
 
 cmd_stats() {
-  local f host
+  local cmd='' dir='' host f
+  local -a files=()
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --cmd) cmd=${2:?}; shift 2 ;;
+      --dir) dir=${2:?}; shift 2 ;;
+      *) echo "shtory: unknown stats option: $1" >&2; return 2 ;;
+    esac
+  done
+  if [[ -n $cmd && ! $cmd =~ ^[0-9]+$ ]]; then
+    echo "shtory: bad --cmd: $cmd" >&2
+    return 2
+  fi
+  if [[ -n $dir && ! $dir =~ ^[0-9]+$ ]]; then
+    echo "shtory: bad --dir: $dir" >&2
+    return 2
+  fi
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
-    host=$(host_of "$f")
-    jq -Rc --arg h "$host" '[. , inputs | fromjson? | select(. != null)]
-      | {host: $h, commands: length,
-         first: (if length then (map(.t) | min | todate) else null end),
-         last: (if length then (map(.t) | max | todate) else null end),
-         failed: ([.[] | select(.e != 0)] | length)}' "$f" || continue
+    files+=("$f")
   done
   shopt -u nullglob
+  if [[ ${#files[@]} -eq 0 ]]; then
+    echo "shtory: no history files" >&2
+    return 1
+  fi
+  if [[ -z $cmd && -z $dir ]]; then
+    for f in "${files[@]}"; do
+      host=$(host_of "$f")
+      jq -Rc --arg h "$host" '[. , inputs | fromjson? | select(. != null)]
+        | {host: $h, commands: length,
+           first: (if length then (map(.t) | min | todate) else null end),
+           last: (if length then (map(.t) | max | todate) else null end),
+           failed: ([.[] | select(.e != 0)] | length)}' "$f" || continue
+    done
+    return 0
+  fi
+  if [[ -n $cmd ]]; then
+    # shellcheck disable=SC2016 # $n for jq
+    jq -Rrc --argjson n "$cmd" '
+      [ . , inputs | fromjson? | select(. != null) ]
+      | group_by(.c) | map({c: .[0].c, n: length}) | sort_by(-.n, .c) | .[0:$n] | .[]
+      | (.n | tostring) + "\t" + .c' "${files[@]}"
+  fi
+  if [[ -n $dir ]]; then
+    # shellcheck disable=SC2016 # $n for jq
+    jq -Rrc --argjson n "$dir" --arg home "$HOME" '
+      def tilde: if $home == "" then .
+        elif . == $home then "~"
+        elif startswith($home + "/") then "~" + .[($home | length):]
+        else . end;
+      [ . , inputs | fromjson? | select(. != null) ]
+      | group_by(.d) | map({d: .[0].d, n: length}) | sort_by(-.n, .d) | .[0:$n] | .[]
+      | (.n | tostring) + "\t" + (.d | tilde)' "${files[@]}"
+  fi
 }
 
 # dedupe + cap $1 (a history file) to the newest $2 lines
