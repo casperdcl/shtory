@@ -58,7 +58,7 @@ printf 'q"uote and \back\slash'
 secret_cmd here
 EOF
 (
-  cd /tmp
+  cd /tmp || exit 1
   HOME=$H SHTORY_HOSTNAME=testhost SHTORY_SKIP='secret_cmd' TERM=dumb \
     bash -i < "$T/hook.sh" >/dev/null 2>&1
 )
@@ -167,8 +167,9 @@ cat > "$SHIM/rsync" <<'EOF'
 #!/usr/bin/env bash
 args=("$@")
 if [[ ${#args[@]} -eq 3 && ${args[1]} == *:* ]]; then
-  dest=${args[2]}; n=0
-  for f in "$FAKE_REMOTE"/.bash_history.*.jsonl; do
+  h=${args[1]%%:*}; dest=${args[2]}; n=0
+  src="$FAKE_REMOTE/$h"; [[ -d $src ]] || src=$FAKE_REMOTE
+  for f in "$src"/.bash_history.*.jsonl; do
     [[ -e $f ]] || continue
     cp "$f" "$dest/" && n=$((n + 1))
   done
@@ -176,8 +177,11 @@ if [[ ${#args[@]} -eq 3 && ${args[1]} == *:* ]]; then
 fi
 i=0
 while [[ ${args[i]} != -- ]]; do i=$((i + 1)); done
+h=${args[-1]%%:*}
+dest=$FAKE_REMOTE
+[[ -d $dest/$h ]] && dest=$dest/$h
 files=("${args[@]:i + 1: ${#args[@]} - i - 2}")
-for f in "${files[@]}"; do cp "$f" "$FAKE_REMOTE/"; done
+for f in "${files[@]}"; do cp "$f" "$dest/"; done
 exit 0
 EOF
 chmod +x "$SHIM/ssh" "$SHIM/rsync"
@@ -206,6 +210,54 @@ out=$(
     "$B" sync fakeA 2>&1
 )
 if [[ $out == *fakeA:*synced* && $out != *fakeB* ]]; then ok "explicit <host>: no auto-detect"; else bad "explicit <host>: no auto-detect ($out)"; fi
+
+# multi-host: every host must receive the full merge (per-host loop left later hosts stale)
+M=$T/mh_remote
+for h in mA mB mC; do mkdir -p "$M/$h"; done
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' '{"t":2,"d":"/x","e":0,"c":"a2"}' > "$M/mA/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$M/mA/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$M/mA/.bash_history.mC.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$M/mB/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' '{"t":2,"d":"/x","e":0,"c":"b2"}' > "$M/mB/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$M/mB/.bash_history.mC.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$M/mC/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$M/mC/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' '{"t":2,"d":"/x","e":0,"c":"c2"}' > "$M/mC/.bash_history.mC.jsonl"
+MH=$T/mh_home; mkdir -p "$MH"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$MH/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$MH/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$MH/.bash_history.mC.jsonl"
+printf 'mA\nmB\nmC\n' > "$T/ssh_hosts4"
+(
+  HOME=$MH FAKE_REMOTE=$M FAKE_SSH_HOSTS=$T/ssh_hosts4 PATH="$SHIM:$PATH" \
+  "$B" sync mA mB mC
+) >/dev/null 2>&1
+assert_eq "multi-host: mA got mC's new line" $'{"t":1,"d":"/x","e":0,"c":"c1"}\n{"t":2,"d":"/x","e":0,"c":"c2"}' \
+  "$(cat "$M/mA/.bash_history.mC.jsonl")"
+assert_eq "multi-host: mC got mB's new line" $'{"t":1,"d":"/x","e":0,"c":"b1"}\n{"t":2,"d":"/x","e":0,"c":"b2"}' \
+  "$(cat "$M/mC/.bash_history.mB.jsonl")"
+assert_eq "multi-host: local merged everything" $'{"t":1,"d":"/x","e":0,"c":"a1"}\n{"t":2,"d":"/x","e":0,"c":"a2"}' \
+  "$(cat "$MH/.bash_history.mA.jsonl")"
+
+# sync --self
+L4=$T/self_home; R4=$T/self_remote
+mkdir -p "$L4" "$R4"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L4/.bash_history.hostY.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R4/.bash_history.hostY.jsonl"
+printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L4/.bash_history.other2.jsonl"
+printf 'hostY\n' > "$T/ssh_hosts5"
+(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 PATH="$SHIM:$PATH" \
+  "$B" sync hostY
+) >/dev/null 2>&1
+assert_eq "sync: own file not pushed by default" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}' \
+  "$(cat "$R4/.bash_history.hostY.jsonl")"
+(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 PATH="$SHIM:$PATH" \
+  "$B" sync --self hostY
+) >/dev/null 2>&1
+assert_eq "sync --self: own file pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
+  "$(cat "$R4/.bash_history.hostY.jsonl")"
 
 echo "# result"
 if [[ $FAILS -eq 0 ]]; then

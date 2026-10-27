@@ -72,12 +72,14 @@ shtory hostname [<host>]
 Sync histories across multiple systems over `ssh`.
 
 ```bash
-shtory sync [<host>...]
+shtory sync [--self] [<host>...]
 ```
 
 Pulls every host, merges differences (`jq` union), then pushes.
 
-Any discrepancies between local & remote host files are merged with `jq`.
+Pulls every host, merges once (`jq` union), then pushes to every host.
+Pushing to a host excludes that host's own file (its history is authoritative on its own host);
+`--self` also pushes the host's own file.
 
 ## stats
 
