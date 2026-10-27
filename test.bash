@@ -333,6 +333,36 @@ assert_eq "partial pull: merged what arrived" $'{"t":10,"d":"/x","e":0,"c":"shar
   "$(cat "$L6/.bash_history.part.jsonl")"
 [[ $out == *"pull incomplete (rsync 23)"* ]] && ok "partial pull: warned" || bad "partial pull: warned ($out)"
 
+echo "# interactive (pty via script(1); skipped if unavailable)"
+if ! command -v script >/dev/null 2>&1; then
+  echo "SKIP - script (util-linux) not installed"
+else
+  SC=$(command -v script)
+  # last content line of a pty capture: drop CR/ESC bytes and CSI parameter text
+  lastline() {
+    printf '%s\n' "$1" | tr -d '\r\033' | sed 's/\[[0-9;?]*[a-zA-Z]//g' \
+      | grep -v '^[[:space:]]*$' | tail -1
+  }
+  NP=$T/nopath; mkdir -p "$NP" # pty PATH: no fzf/tui-shtory -> numbered loop
+  for b in bash sh jq cat stty; do
+    p=$(command -v "$b") && ln -sf "$p" "$NP/$b"
+  done
+  PTH=$T/pty_home; mkdir -p "$PTH"
+  printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"git status"}' '{"t":2,"d":"/x","e":0,"c":"git push"}' \
+    > "$PTH/.bash_history.pty.jsonl"
+
+  # numbered loop: type a pattern, select row 1 (newest match)
+  out=$(printf 'git\n1\n' | SHELL=$NP/bash PATH=$NP HOME=$PTH \
+    "$SC" -qec "$B search" /dev/null 2>/dev/null | tr -d '\r')
+  [[ $(lastline "$out") == *"git push"* ]] && ok "pty: numbered loop selects" || bad "pty: numbered loop selects ($(lastline "$out"))"
+
+  # tui-shtory: rows from a file (EOF), keys via the pty
+  printf 'alpha cmd\nbeta cmd\n' > "$T/tui_rows"
+  out=$(printf 'a\n' | SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
+    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows" /dev/null 2>/dev/null | tr -d '\r')
+  [[ $(lastline "$out") == *"alpha cmd"* ]] && ok "pty: tui-shtory filters & selects" || bad "pty: tui-shtory filters & selects ($(lastline "$out"))"
+fi
+
 echo "# result"
 if [[ $FAILS -eq 0 ]]; then
   echo "all tests passed"
