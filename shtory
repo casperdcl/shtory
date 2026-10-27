@@ -280,6 +280,8 @@ search_tui_filter() {
 search_tui() {
   local items=("$@") filter='' sel=0 hx=0 key line rc=1
   local cols lines m h n start maxl prev_exit size d k2 k3 r c1 tail b w n1
+  local -a shown=()
+  local filter_prev=$'\x01' # sentinel: force the first computation
   # no alt-screen here: plain CUP/ED only, so terminals without ?1049 support
   # still get a working (if flickering) picker
   if size=$(stty size < /dev/tty 2>/dev/null); then
@@ -299,6 +301,8 @@ search_tui() {
   m=$(( cols - 1 ))
   w=$(( m - 1 ))
   h=$(( lines - 2 ))
+  local padstr
+  padstr=$(printf '%*s' "$w" '')
   if ! stty raw -echo < /dev/tty > /dev/null 2>&1; then
     return 1
   fi
@@ -306,10 +310,19 @@ search_tui() {
   trap 'stty -raw echo < /dev/tty 2>/dev/null' EXIT
   trap 'stty -raw echo < /dev/tty 2>/dev/null; exit 1' INT
   while :; do
-    local -a shown=()
-    while IFS= read -r line; do
-      shown+=("$line")
-    done < <(search_tui_filter "$filter" "${items[@]}")
+    # filter only on filter change: an arrow-only frame must not re-run
+    # the O(rows) filter (that was the visible lag per keystroke)
+    if [[ $filter != "$filter_prev" ]]; then
+      if [[ -z $filter ]]; then
+        shown=("${items[@]}")
+      else
+        shown=()
+        while IFS= read -r line; do
+          shown+=("$line")
+        done < <(search_tui_filter "$filter" "${items[@]}")
+      fi
+      filter_prev=$filter
+    fi
     if (( sel >= ${#shown[@]} )); then
       if (( ${#shown[@]} > 0 )); then
         sel=$(( ${#shown[@]} - 1 ))
@@ -328,44 +341,60 @@ search_tui() {
     if (( hx > maxl - w )); then
       hx=$(( maxl > w ? maxl - w : 0 ))
     fi
-    { printf '\e[H\e[J'
-      printf ' %-*s\r\n' "$w" "${filter:0:m-1}"
-      for n in "${!shown[@]}"; do
-        if (( n < start || n >= start + h )); then
-          continue
-        fi
-        # first field (command) plain, second column onwards dim
-        r=${shown[n]}
-        if [[ $r == *$'\t'* ]]; then
-          c1=${r%%$'\t'*}
-          tail=${r#*$'\t'}
-          d=$c1"  "${tail//$'\t'/  }
-          b=${#c1}
+    # one accumulated string, one write: per-row printf syscalls are what
+    # made each frame take hundreds of ms through the pty line discipline
+    local frame='' seg pad p2 pad2
+    frame+=$'\e[H\e[J'
+    for n in "${!shown[@]}"; do
+      if (( n < start || n >= start + h )); then
+        continue
+      fi
+      # first field (command) plain, second column onwards dim
+      r=${shown[n]}
+      if [[ $r == *$'\t'* ]]; then
+        c1=${r%%$'\t'*}
+        tail=${r#*$'\t'}
+        d=$c1"  "${tail//$'\t'/  }
+        b=${#c1}
+      else
+        d=${r//$'\t'/  }
+        b=''
+      fi
+      seg=${d:hx:w}
+      pad=${padstr:0:$(( w - ${#seg} ))}
+      if [[ -z $b ]] || (( hx + w <= b )); then
+        if (( n == sel )); then
+          frame+=$'\e[7m '"$seg$pad"$'\e[0m\r\n'
         else
-          d=${r//$'\t'/  }
-          b=''
+          frame+=' '"$seg$pad"$'\r\n'
         fi
-        if [[ -z $b ]] || (( hx + w <= b )); then
-          if (( n == sel )); then
-            printf '\e[7m %-*s\e[0m\r\n' "$w" "${d:hx:w}"
-          else
-            printf ' %-*s\r\n' "$w" "${d:hx:w}"
-          fi
-        elif (( hx >= b )); then
-          if (( n == sel )); then
-            printf ' \e[7;2m%-*s\e[0m\r\n' "$w" "${d:hx:w}"
-          else
-            printf ' \e[2m%-*s\e[0m\r\n' "$w" "${d:hx:w}"
-          fi
+      elif (( hx >= b )); then
+        if (( n == sel )); then
+          frame+=' '$'\e[7;2m'"$seg$pad"$'\e[0m\r\n'
         else
-          n1=$(( b - hx ))
-          if (( n == sel )); then
-            printf '\e[7m %s\e[7;2m%-*s\e[0m\r\n' "${d:hx:n1}" "$(( w - n1 ))" "${d:hx+n1}"
-          else
-            printf ' %s\e[2m%-*s\e[0m\r\n' "${d:hx:n1}" "$(( w - n1 ))" "${d:hx+n1}"
-          fi
+          frame+=' '$'\e[2m'"$seg$pad"$'\e[0m\r\n'
         fi
-      done; } > /dev/tty
+      else
+        n1=$(( b - hx ))
+        p2=${d:hx+n1:w-n1}
+        pad2=${padstr:0:$(( w - n1 - ${#p2} ))}
+        if (( n == sel )); then
+          frame+=$'\e[7m '"${d:hx:n1}"$'\e[7;2m'"$p2$pad2"$'\e[0m\r\n'
+        else
+          frame+=' '"${d:hx:n1}"$'\e[2m'"$p2$pad2"$'\e[0m\r\n'
+        fi
+      fi
+    done
+    # filter prompt pinned to the bottom of the viewport, like fzf
+    local prow=$(( ${#shown[@]} < h ? ${#shown[@]} : h ))
+    while (( prow < h )); do
+      frame+=' '"$padstr"$'\r\n'
+      prow=$(( prow + 1 ))
+    done
+    # no padding/newline after the prompt: the cursor must stay right
+    # behind the typed filter (stale padding is cleared by the next
+    # frame's \e[J)
+    printf '%s' "$frame ${filter:0:m-1}" > /dev/tty
     if ! read -rs -N 1 key < /dev/tty; then
       rc=1; break
     fi
@@ -400,11 +429,15 @@ search_tui() {
       *) if [[ ${key:0:1} != [[:cntrl:]] ]]; then filter+=$key; fi ;;
     esac
   done
+  # restore the tty before touching the traps: clearing the EXIT trap
+  # below must not swallow the restore
+  stty -raw echo < /dev/tty 2>/dev/null
   if [[ -n $prev_exit ]]; then
     eval "$prev_exit"
   else
     trap - EXIT
   fi
+  trap - INT
   return $rc
 }
 
@@ -447,7 +480,7 @@ cmd_search() {
   if [[ -z $limit ]]; then
     # the pure-bash interactive picker (TUI/loop) filters O(rows) per
     # keystroke, so it stays capped; fzf and non-interactive are unlimited
-    if [[ $interactive -eq 1 && ! $(command -v fzf) ]]; then
+    if [[ $interactive -eq 1 && ( ! $(command -v fzf) || ${SHTORY_TUI:-} == 1 ) ]]; then
       limit=9999
     else
       limit=0
@@ -455,7 +488,7 @@ cmd_search() {
   fi
   if [[ $interactive -eq 1 ]]; then
     local sel_row
-    if command -v fzf >/dev/null 2>&1; then
+    if [[ -z "${SHTORY_TUI:-}" ]] && command -v fzf >/dev/null 2>&1; then
       if ! sel_row=$(query '' rows | fzf); then
         return 1
       fi
@@ -463,6 +496,12 @@ cmd_search() {
       return 0
     fi
     if : > /dev/tty 2>/dev/null; then
+      # claim the tty before the slow query: keys typed while it runs
+      # would otherwise stick in the cooked line buffer (no newline)
+      # and be lost until the terminal hangs up
+      if ! stty raw -echo < /dev/tty 2>/dev/null; then
+        return 1
+      fi
       local -a rows=()
       mapfile -t rows < <(query '' rows)
       if ! sel_row=$(search_tui "${rows[@]}"); then
