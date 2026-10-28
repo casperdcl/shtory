@@ -440,7 +440,7 @@ sync_push() {
 
 cmd_sync() {
   local -a hosts=()
-  local h f cap='' self=0
+  local h f cap='' self=0 name rc
   while [[ $# -gt 0 ]]; do
     case $1 in
       --compact) cap=${2:?}; shift 2 ;;
@@ -455,9 +455,12 @@ cmd_sync() {
   fi
   [[ -n $cap ]] && self=1 # --compact implies --self
   if [[ ${#hosts[@]} -eq 0 ]]; then
+    local localhost=${SHTORY_HOSTNAME:-$HOSTNAME}
     shopt -s nullglob
     for f in "$HOME"/.bash_history.*.jsonl; do
-      hosts+=("$(host_of "$f")")
+      h=$(host_of "$f")
+      [[ $h == "$localhost" ]] && continue # skip self
+      hosts+=("$h")
     done
     shopt -u nullglob
   fi
@@ -477,9 +480,15 @@ cmd_sync() {
       echo "shtory: skipping '$h' (not in ~/.ssh/config)" >&2
       continue
     fi
-    # name reported by host itself; may differ from ssh alias
-    name_of[$h]=$(ssh "$h" "bash -c 'printf %s \${SHTORY_HOSTNAME:-\$HOSTNAME}'" 2>/dev/null)
-    name_of[$h]=${name_of[$h]:-$h}
+    # name reported by host itself; may differ from ssh alias.
+    rc=0
+    name=$(ssh -o ConnectTimeout=10 "$h" \
+      "bash -c 'printf %s \${SHTORY_HOSTNAME:-\$HOSTNAME}'" 2>/dev/null) || rc=$?
+    if (( rc == 255 )); then
+      echo "shtory: $h: unreachable (skipped)" >&2
+      continue
+    fi
+    name_of[$h]=${name:-$h}
     sync_pull "$h" "$tmpdir/$h" && pulled+=("$h")
   done
   if [[ ${#pulled[@]} -eq 0 ]]; then

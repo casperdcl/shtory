@@ -174,6 +174,17 @@ if [[ ${1:-} == -G ]]; then
   exit 0
 fi
 h=$1
+a=(); a+=("$@")
+for (( i = 0; i < ${#a[@]}; i++ )); do
+  case ${a[i]} in
+    -o) (( i++ )); continue ;; # skip -o and its value
+    -*) continue ;;
+    *) h=${a[i]}; break ;;
+  esac
+done
+if [[ -n ${FAKE_DOWN:-} ]] && grep -qx "$h" "$FAKE_DOWN"; then
+  exit 255
+fi
 if [[ -n ${FAKE_HOSTNAMES:-} ]] && grep -q "^$h " "$FAKE_HOSTNAMES"; then
   awk -v h="$h" '$1 == h {print $2}' "$FAKE_HOSTNAMES"
   exit 0
@@ -184,8 +195,15 @@ EOF
 cat > "$SHIM/rsync" <<'EOF'
 #!/usr/bin/env bash
 args=("$@")
-if [[ ${#args[@]} -eq 3 && ${args[1]} == *:* ]]; then
-  h=${args[1]%%:*}; dest=${args[2]}; n=0
+src_arg=''; has_dd=0
+for a in "${args[@]}"; do
+  [[ $a == -- ]] && has_dd=1
+  [[ $a == -* ]] && continue
+  [[ -z $src_arg && $a == *:* ]] && src_arg=$a
+done
+# pull: no '--', host:src present; push: files after '--'
+if [[ $has_dd -eq 0 && -n $src_arg ]]; then
+  h=${src_arg%%:*}; dest=${args[-1]}; n=0
   src="$FAKE_REMOTE/$h"; [[ -d $src ]] || src=$FAKE_REMOTE
   for f in "$src"/.bash_history.*.jsonl; do
     [[ -e $f ]] || continue
@@ -197,7 +215,8 @@ if [[ ${#args[@]} -eq 3 && ${args[1]} == *:* ]]; then
   exit $((n == 0))
 fi
 i=0
-while [[ ${args[i]} != -- ]]; do i=$((i + 1)); done
+while [[ ${args[i]-} != -- && $i -lt ${#args[@]} ]]; do i=$((i + 1)); done
+[[ ${args[i]-} == -- ]] || exit 1
 h=${args[-1]%%:*}
 dest=$FAKE_REMOTE
 [[ -d $dest/$h ]] && dest=$dest/$h
@@ -212,8 +231,8 @@ printf '%s\n' '{"t":200,"d":"/x","e":0,"c":"onA"}' '{"t":300,"d":"/a","e":0,"c":
 printf '%s\n' '{"t":50,"d":"/z","e":0,"c":"fromB"}' > "$R/.bash_history.fakeB.jsonl"
 printf 'fakeA\nfakeB\n' > "$T/ssh_hosts"
 (
-  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts PATH="$SHIM:$PATH" \
-    "$B" sync
+  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts SHTORY_HOSTNAME=me \
+    PATH="$SHIM:$PATH" "$B" sync
 )
 assert_eq "merged union, t-sorted" $'{"t":200,"d":"/x","e":0,"c":"onA"}\n{"t":300,"d":"/a","e":0,"c":"shared"}\n{"t":400,"d":"/y","e":1,"c":"remote-only"}' \
   "$(cat "$L/.bash_history.fakeA.jsonl")"
@@ -221,8 +240,8 @@ assert_eq "missing file pulled" '{"t":50,"d":"/z","e":0,"c":"fromB"}' "$(cat "$L
 [[ -f $R/.bash_history.localhost.jsonl ]] && ok "local-only pushed to remote" || bad "local-only pushed to remote"
 md5sum "$L"/.bash_history.*.jsonl > "$T/m1"
 (
-  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts PATH="$SHIM:$PATH" \
-    "$B" sync
+  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts SHTORY_HOSTNAME=me \
+    PATH="$SHIM:$PATH" "$B" sync
 ) >/dev/null 2>&1
 md5sum "$L"/.bash_history.*.jsonl > "$T/m2"
 if diff -q "$T/m1" "$T/m2" >/dev/null; then ok "idempotent"; else bad "idempotent"; fi
@@ -231,6 +250,29 @@ out=$(
     "$B" sync fakeA 2>&1
 )
 if [[ $out == *fakeA:*synced* && $out != *fakeB* ]]; then ok "explicit <host>: no auto-detect"; else bad "explicit <host>: no auto-detect ($out)"; fi
+
+# auto-detect must skip the local host's own file (it is local, not a remote)
+L4=$T/ad_home; R4=$T/ad_remote
+mkdir -p "$L4" "$R4"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"on-me"}' > "$L4/.bash_history.me.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"stale"}' > "$L4/.bash_history.dev1.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"stale"}' '{"t":2,"d":"/x","e":0,"c":"on-remote"}' > "$R4/.bash_history.dev1.jsonl"
+printf 'dev1\n' > "$T/ssh_hosts5"
+out=$(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync 2>&1
+)
+if [[ $out == *dev1:*synced* && $out != *me* ]]; then ok "auto-detect skips local host"; else bad "auto-detect skips local host ($out)"; fi
+[[ -f $R4/.bash_history.me.jsonl ]] && ok "local file still pushed to remote" || bad "local file still pushed to remote"
+assert_eq "auto-detect: remote file merged locally" $'{"t":1,"d":"/x","e":0,"c":"stale"}\n{"t":2,"d":"/x","e":0,"c":"on-remote"}' \
+  "$(cat "$L4/.bash_history.dev1.jsonl")"
+
+# unreachable host (ssh rc 255) is skipped, not hung on
+out=$(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 FAKE_DOWN=$T/ssh_hosts5 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync dev1 2>&1
+)
+if [[ $out == *dev1:*unreachable* ]]; then ok "unreachable host skipped"; else bad "unreachable host skipped ($out)"; fi
 
 # multi-host: every host must receive the full merge (per-host loop left later hosts stale)
 M=$T/mh_remote
