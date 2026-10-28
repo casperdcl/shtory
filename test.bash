@@ -165,6 +165,10 @@ HOME=$CE "$B" compact 10
 assert_eq "compact n>length: keep all, deduped, ascending" "1 3 5" "$(jq -r .t "$CE/.bash_history.e.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 HOME=$CE "$B" compact 0
 assert_eq "compact n=0: empties" "0" "$(wc -l < "$CE/.bash_history.e.jsonl")"
+printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":2,"d":"/z","e":0,"c":"b"}' > "$CE/.bash_history.m.jsonl"
+chmod 600 "$CE/.bash_history.m.jsonl"
+HOME=$CE "$B" compact 5
+[[ $(stat -c %a "$CE/.bash_history.m.jsonl") == 600 ]] && ok "compact preserves mode 600" || bad "compact preserves mode 600 ($(stat -c %a "$CE/.bash_history.m.jsonl"))"
 
 echo "# import (install --import)"
 I=$T/importhome; F=$I/.bash_history.imphost.jsonl; mkdir -p "$I"
@@ -289,6 +293,7 @@ EOF
 chmod +x "$SHIM/ssh" "$SHIM/rsync"
 printf '%s\n' '{"t":100,"d":"/a","e":0,"c":"local-only"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' > "$L/.bash_history.localhost.jsonl"
 printf '%s\n' '{"t":200,"d":"/x","e":0,"c":"onA"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' > "$L/.bash_history.fakeA.jsonl"
+chmod 600 "$L/.bash_history.fakeA.jsonl"   # must survive the merge
 printf '%s\n' '{"t":200,"d":"/x","e":0,"c":"onA"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/y","e":1,"c":"remote-only"}' > "$R/.bash_history.fakeA.jsonl"
 printf '%s\n' '{"t":50,"d":"/z","e":0,"c":"fromB"}' > "$R/.bash_history.fakeB.jsonl"
 printf 'fakeA\nfakeB\n' > "$T/ssh_hosts"
@@ -298,6 +303,7 @@ printf 'fakeA\nfakeB\n' > "$T/ssh_hosts"
 )
 assert_eq "merged union, t-sorted" $'{"t":200,"d":"/x","e":0,"c":"onA"}\n{"t":300,"d":"/a","e":0,"c":"shared"}\n{"t":400,"d":"/y","e":1,"c":"remote-only"}' \
   "$(cat "$L/.bash_history.fakeA.jsonl")"
+[[ $(stat -c %a "$L/.bash_history.fakeA.jsonl") == 600 ]] && ok "sync merge preserves mode 600" || bad "sync merge preserves mode 600 ($(stat -c %a "$L/.bash_history.fakeA.jsonl"))"
 assert_eq "missing file pulled" '{"t":50,"d":"/z","e":0,"c":"fromB"}' "$(cat "$L/.bash_history.fakeB.jsonl")"
 [[ -f $R/.bash_history.localhost.jsonl ]] && ok "local-only pushed to remote" || bad "local-only pushed to remote"
 md5sum "$L"/.bash_history.*.jsonl > "$T/m1"

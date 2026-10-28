@@ -204,7 +204,7 @@ import_history() {
          | keys_unsorted | .[] | {t:0,d:"",e:0,c:.}' > "$tmp"; then
     n=$(wc -l < "$tmp")
     if (( n > 0 )); then
-      local out; out=$(mktemp)   # 0600; redirect truncates (mode-preserving)
+      local out; out=$(mktemp "$f.XXXXXX")   # 0600, same dir so mv is atomic; redirect truncates (mode-preserving)
       if [[ -f $f ]]; then cat "$tmp" "$f" > "$out"; else cat "$tmp" > "$out"; fi
       mv "$out" "$f"
       echo "shtory: imported $n commands into $f"
@@ -444,7 +444,7 @@ sync_pull() {
 
 # union every pulled copy of each file with the local one; $1 = pull root
 sync_merge() {
-  local root=$1 f base
+  local root=$1 f base tmp
   local -a files=() parts=()
   shopt -s nullglob
   for f in "$root"/*/.bash_history.*.jsonl; do
@@ -455,12 +455,13 @@ sync_merge() {
     base=${f##*/}
     parts=("$root"/*/"$base")
     [[ -f "$HOME/$base" ]] && parts=("$HOME/$base" "${parts[@]}")
+    tmp=$(mktemp "$HOME/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
       | jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]' \
-      > "$HOME/$base.tmp"; then
-      mv "$HOME/$base.tmp" "$HOME/$base"
+      > "$tmp"; then
+      mv "$tmp" "$HOME/$base"
     else
-      rm -f "$HOME/$base.tmp"
+      rm -f "$tmp"
       echo "shtory: merge of $base failed" >&2
     fi
   done
@@ -619,13 +620,14 @@ cmd_stats() {
 
 # dedupe + cap $1 (a history file) to the newest $2 lines
 compact_file() {
-  local f=$1 n=$2
+  local f=$1 n=$2 tmp
+  tmp=$(mktemp "${f}.XXXXXX") # 0600, same dir as $f so mv is atomic
   if prog "compact" < "$f" \
     | jq -Rc --argjson n "$n" '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[ ((length - $n) as $s | if $s < 0 then 0 else $s end) : ] | .[]' \
-    > "$f.tmp"; then
-    mv "$f.tmp" "$f"
+    > "$tmp"; then
+    mv "$tmp" "$f"
   else
-    rm -f "$f.tmp"
+    rm -f "$tmp"
   fi
 }
 
