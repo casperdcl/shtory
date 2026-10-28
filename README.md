@@ -17,10 +17,12 @@ All in a pure bash script.
 Place on `$PATH` and install:
 
 ```bash
-curl -fsSLo ~/.local/bin/shtory https://raw.githubusercontent.com/casperdcl/shtory/main/shtory
-curl -fsSLo ~/.local/bin/tui-shtory https://raw.githubusercontent.com/casperdcl/shtory/main/tui-shtory
-shtory install
+echo 'export SHTORY_HOSTNAME=$HOSTNAME' >> ~/.bashrc; . ~/.bashrc # optional
+curl -fsSLO --output-dir ~/.local/bin/ https://raw.githubusercontent.com/casperdcl/shtory/main/{tui-,}shtory
+shtory install --import
 ```
+
+- `--import`: also include existing `~/.bash_history` (with no path/time/exit code info)
 
 This appends a `shtory` block to `~/.bashrc`.
 

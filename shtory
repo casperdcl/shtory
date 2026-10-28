@@ -21,8 +21,9 @@ shtory <subcommand> [options]
 supercharge bash history: per-host logs with search & serverless sync.
 
 subcommands:
-  install
+  install [--import]
           add hook & search keybinding to ~/.bashrc
+      --import: merges ~/.bash_history into ~/.bash_history.*.jsonl
   uninstall
           remove them again
   help    this text
@@ -129,6 +130,9 @@ if [[ $- == *i* ]]; then
       '')
         COMPREPLY=($(compgen -W 'install uninstall search hostname sync stats compact help' -- "$cur"))
         ;;
+      install)
+        COMPREPLY=($(compgen -W '--import' -- "$cur"))
+        ;;
       search)
         case $prev in
           -h|--hostname)
@@ -182,14 +186,56 @@ strip_line() {
   rm -f "$tmp"
 }
 
-cmd_install() {
-  local rc
-  rc=$(bashrc)
-  if [[ -f $rc ]] && grep -qF "$MARK_START" "$rc"; then
-    remove_block "$rc"
+# import from `sort -u ~/.bash_history | grep -v "^#"` with {t:0, d:"", e:0}
+# (used by install --import)
+import_history() {
+  local src="$HOME/.bash_history" f tmp n
+  f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
+  tmp=$(mktemp)
+  # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
+  # drop comments, dedupe already-imported t:0 commands
+  if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
+    | { LC_ALL=C grep -a -v '^#' || true; } \
+    | jq -Rcn --slurpfile ex <( [[ -f $f ]] && cat "$f" ) \
+        '($ex | map(select(.t == 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $exset
+         | [inputs | select(length > 0)]
+         | reduce .[] as $c ({}; if ($exset[$c]) or (.[ $c ]) then . else .[$c] = true end)
+         | keys_unsorted | .[] | {t:0,d:"",e:0,c:.}' > "$tmp"; then
+    n=$(wc -l < "$tmp")
+    if (( n > 0 )); then
+      local out; out=$(mktemp)   # 0600; redirect truncates (mode-preserving)
+      if [[ -f $f ]]; then cat "$tmp" "$f" > "$out"; else cat "$tmp" > "$out"; fi
+      mv "$out" "$f"
+      echo "shtory: imported $n commands into $f"
+    else
+      echo "shtory: nothing to import"
+    fi
+    rm -f "$tmp"
+  else
+    rm -f "$tmp"
+    echo "shtory: import failed" >&2
+    return 1
   fi
-  hook_block >> "$rc"
-  echo "shtory: block written to $rc — start a new shell (or source it)"
+}
+
+cmd_install() {
+  local rcfile import=0
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --import) import=1; shift ;;
+      -*) echo "shtory: unknown install option: $1" >&2; return 2 ;;
+    esac
+  done
+  rcfile=$(bashrc)
+  if [[ -f $rcfile ]] && grep -qF "$MARK_START" "$rcfile"; then
+    remove_block "$rcfile"
+  fi
+  hook_block >> "$rcfile"
+  echo "shtory: block written to $rcfile — start a new shell (or source it)"
+  if (( import )); then
+    import_history
+  fi
 }
 
 cmd_uninstall() {
