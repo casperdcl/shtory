@@ -407,7 +407,8 @@ cmd_search() {
     return 1
   fi
 
-  local interactive=0 picker='' fzf_opts='' sel_row
+  local interactive=0 picker='' fzf_v sel_row
+  local -a fzf_opts=()
   if [[ -t 0 && -z $q ]]; then
     interactive=1
     # prefer fzf; but SHTORY_TUI forces tui-shtory fallback
@@ -415,7 +416,11 @@ cmd_search() {
       picker=tui-shtory
     else
       picker=fzf
-      fzf_opts='--scheme=history --freeze-left=1 -d\t'
+      fzf_opts=(--scheme=history)
+      fzf_v=$(fzf --version 2>/dev/null | awk '{print $1}')
+      # --freeze-left needs fzf>=0.67
+      [[ $(printf '%s\n0.67.0\n' "$fzf_v" | sort -V | head -n1) == 0.67.0 ]] \
+        && fzf_opts+=(--freeze-left=1)
     fi
   fi
   if [[ -z $limit ]]; then
@@ -429,13 +434,11 @@ cmd_search() {
     if [[ -n $picker ]] && command -v "$picker" >/dev/null 2>&1; then
       # pipefail off to allow selecting before stream ends
       if (( limit > 0 )); then
-        # shellcheck disable=SC2086 # word splitting of $fzf_opts intended
-        if ! sel_row=$(set +o pipefail; fzf_rows | head -n "$limit" | "$picker" $fzf_opts); then
+        if ! sel_row=$(set +o pipefail; fzf_rows | head -n "$limit" | "$picker" "${fzf_opts[@]}"); then
           return 1
         fi
       else
-        # shellcheck disable=SC2086 # word splitting intended
-        if ! sel_row=$(set +o pipefail; fzf_rows | "$picker" $fzf_opts); then
+        if ! sel_row=$(set +o pipefail; fzf_rows | "$picker" "${fzf_opts[@]}"); then
           return 1
         fi
       fi
