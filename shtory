@@ -425,7 +425,7 @@ cmd_search() {
       picker_opts=(--freeze-left=1)
     else
       picker=fzf
-      picker_opts=(--scheme=history)
+      picker_opts=(--scheme=history --info=inline-right --border=none --no-scrollbar)
       fzf_v=$(fzf --version 2>/dev/null | awk '{print $1}')
       # --freeze-left needs fzf>=0.67
       [[ $(printf '%s\n0.67.0\n' "$fzf_v" | sort -V | head -n1) == 0.67.0 ]] \
