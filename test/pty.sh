@@ -46,7 +46,7 @@ EOF
 
   # tui-shtory: arrow keys re-render (the inverted row follows sel)
   printf 'alpha x\nbeta x\n' > "$T/tui_rows2"
-  out=$( { sleep 0.7; printf '\x1b[B'; sleep 0.3; printf '\r'; } | \
+  out=$( { sleep 0.7; printf '\x1b[A'; sleep 0.3; printf '\r'; } | \
     SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
     "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows2" /dev/null 2>/dev/null | tr -d '\r')
   [[ $out == *$'\e[7m beta'* ]] && ok "pty: tui-shtory arrow re-renders" || bad "pty: tui-shtory arrow re-renders"

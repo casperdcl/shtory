@@ -88,7 +88,10 @@ main() {
   saved=$(stty -g < /dev/tty 2>/dev/null) || saved=''
   # shellcheck disable=SC2329,SC2317 # invoked via trap
   restore_tty() {
-    (( alt )) && printf '\e[?1049l' > /dev/tty 2>/dev/null
+    if (( alt )); then
+      printf '\e[?1049l' > /dev/tty 2>/dev/null
+      printf '\e[?25h' > /dev/tty 2>/dev/null
+    fi
     if [[ -n $saved ]]; then
       stty "$saved" < /dev/tty 2>/dev/null
     else
@@ -109,6 +112,9 @@ main() {
   fi
   printf '\e[?1049h' > /dev/tty
   alt=1
+  # clear once + hide the cursor (like fzf): the renderer then rewrites
+  # only changed lines, so no per-frame erase/redraw
+  printf '\e[2J\e[?25l' > /dev/tty
 
   # read the stream (fd 6) and send batches; flush at 256 lines or 16KB
   # (a batch must fit the pipe buffer while the main loop is between
@@ -170,11 +176,25 @@ main() {
     fi
   }
 
-  # one accumulated string, one write: per-row printf syscalls are what
-  # made each frame take hundreds of ms through the pty line discipline
+  # diff render (like fzf): each screen row is rewritten only when its
+  # content changes, by absolute position - no \e[H\e[J. Erasing and
+  # redrawing the whole screen per batch was the flicker while the list
+  # filled; once the window stops changing, a render writes nothing.
+  # Every row is exactly m chars (padding covers stale content, so no
+  # \e[K), and the hidden cursor makes its position between writes moot.
+  local -a prev=()
+  for (( i = 0; i < h + 1; i++ )); do
+    prev[i]=' '"$padstr"
+  done
   render() {
-    local n start d
-    start=$(( sel > h - 1 ? sel - h + 1 : 0 ))
+    local n start d top
+    # bottom-anchored window (fzf default layout): the newest visible row
+    # sits just above the prompt, older rows above it, oldest scrolled up
+    # off the top; scrolling keeps the cursor in the window, pinned to the
+    # edge it crossed (fzf --scroll-off=0)
+    start=$(( sel - h + 1 < 0 ? 0 : sel - h + 1 ))
+    top=$(( ${#shown[@]} - h < 0 ? 0 : ${#shown[@]} - h ))
+    (( start > top )) && start=$top
     maxl=0
     for n in "${!shown[@]}"; do
       d=${shown[n]//$'\t'/  }
@@ -185,58 +205,62 @@ main() {
     if (( hx > maxl - w )); then
       hx=$(( maxl > w ? maxl - w : 0 ))
     fi
-    local frame='' seg pad p2 pad2 r c1 tail b n1
-    frame+=$'\e[H\e[J'
-    for n in "${!shown[@]}"; do
-      if (( n < start || n >= start + h )); then
-        continue
-      fi
-      # first field (command) plain, second column onwards dim
-      r=${shown[n]}
-      if [[ $r == *$'\t'* ]]; then
-        c1=${r%%$'\t'*}
-        tail=${r#*$'\t'}
-        d=$c1"  "${tail//$'\t'/  }
-        b=${#c1}
+    local out='' row l r c1 tail b seg pad p2 pad2 n1
+    # screen row r (1-based) = item start + h - r; row h+1 = the prompt
+    for (( row = 1, n = start + h - 1; n >= start; row++, n-- )); do
+      if (( n >= ${#shown[@]} )); then
+        l=' '"$padstr"
       else
-        d=${r//$'\t'/  }
-        b=''
+        # first field (command) plain, second column onwards dim
+        r=${shown[n]}
+        if [[ $r == *$'\t'* ]]; then
+          c1=${r%%$'\t'*}
+          tail=${r#*$'\t'}
+          d=$c1"  "${tail//$'\t'/  }
+          b=${#c1}
+        else
+          d=${r//$'\t'/  }
+          b=''
+        fi
+        seg=${d:hx:w}
+        pad=${padstr:0:$(( w - ${#seg} ))}
+        if [[ -z $b ]] || (( hx + w <= b )); then
+          if (( n == sel )); then
+            l=$'\e[7m '"$seg$pad"$'\e[0m'
+          else
+            l=' '"$seg$pad"
+          fi
+        elif (( hx >= b )); then
+          if (( n == sel )); then
+            l=' '$'\e[7;2m'"$seg$pad"$'\e[0m'
+          else
+            l=' '$'\e[2m'"$seg$pad"$'\e[0m'
+          fi
+        else
+          n1=$(( b - hx ))
+          p2=${d:hx+n1:w-n1}
+          pad2=${padstr:0:$(( w - n1 - ${#p2} ))}
+          if (( n == sel )); then
+            l=$'\e[7m '"${d:hx:n1}"$'\e[7;2m'"$p2$pad2"$'\e[0m'
+          else
+            l=' '"${d:hx:n1}"$'\e[2m'"$p2$pad2"$'\e[0m'
+          fi
+        fi
       fi
-      seg=${d:hx:w}
-      pad=${padstr:0:$(( w - ${#seg} ))}
-      if [[ -z $b ]] || (( hx + w <= b )); then
-        if (( n == sel )); then
-          frame+=$'\e[7m '"$seg$pad"$'\e[0m\r\n'
-        else
-          frame+=' '"$seg$pad"$'\r\n'
-        fi
-      elif (( hx >= b )); then
-        if (( n == sel )); then
-          frame+=' '$'\e[7;2m'"$seg$pad"$'\e[0m\r\n'
-        else
-          frame+=' '$'\e[2m'"$seg$pad"$'\e[0m\r\n'
-        fi
-      else
-        n1=$(( b - hx ))
-        p2=${d:hx+n1:w-n1}
-        pad2=${padstr:0:$(( w - n1 - ${#p2} ))}
-        if (( n == sel )); then
-          frame+=$'\e[7m '"${d:hx:n1}"$'\e[7;2m'"$p2$pad2"$'\e[0m\r\n'
-        else
-          frame+=' '"${d:hx:n1}"$'\e[2m'"$p2$pad2"$'\e[0m\r\n'
-        fi
+      if [[ $l != "${prev[row-1]}" ]]; then
+        out+=$'\e['"$row"';1H'"$l"
+        prev[row-1]=$l
       fi
     done
-    # filter prompt pinned to the bottom of the viewport, like fzf
-    local prow=$(( ${#shown[@]} < h ? ${#shown[@]} : h ))
-    while (( prow < h )); do
-      frame+=' '"$padstr"$'\r\n'
-      prow=$(( prow + 1 ))
-    done
-    # no padding/newline after the prompt: the cursor must stay right
-    # behind the typed filter (stale padding is cleared by the next
-    # frame's \e[J)
-    printf '%s' "$frame ${filter:0:m-1}" > /dev/tty
+    # prompt row: cursor is hidden, so pad to m like the other rows (a
+    # shorter rewrite would leave stale characters)
+    l=' '${filter:0:m-1}
+    l+="${padstr:0:$(( m - ${#l} ))}"
+    if [[ $l != "${prev[h]}" ]]; then
+      out+=$'\e['$(( h + 1 ))';1H'"$l"
+      prev[h]=$l
+    fi
+    [[ -n $out ]] && printf '%s' "$out" > /dev/tty
   }
 
   local changed=1
@@ -294,9 +318,10 @@ main() {
     fi
     case $key in
       $'\x1b[A' | $'\x1bOA')
-        if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
-      $'\x1b[B' | $'\x1bOB')
+        # bottom-up list: up = older items (sel+1), down = newer (sel-1)
         if (( sel < ${#shown[@]} - 1 )); then sel=$(( sel + 1 )); fi ;;
+      $'\x1b[B' | $'\x1bOB')
+        if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
       $'\x1b[D' | $'\x1bOD')
         if (( hx > 0 )); then hx=$(( hx - 1 )); fi ;;
       $'\x1b[C' | $'\x1bOC')
