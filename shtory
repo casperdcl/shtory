@@ -47,7 +47,7 @@ search options:
   -H, --localhost         same as -h="${SHTORY_HOSTNAME:-$HOSTNAME}"
   -c, --cwd               only commands run in $PWD
   -s, --sort <order>      newest (default)/oldest/count
-  -n, --limit <n>         max results, default: 9999 in tui-shtory fallback, 0 (unlimited) otherwise
+  -n, --limit <n>         max results, default 0 (unlimited)
   -z, --zero              only commands with exit code 0
   -Z, --nonzero           only commands with non-zero exit code
 EOF
@@ -432,11 +432,7 @@ cmd_search() {
     fi
   fi
   if [[ -z $limit ]]; then
-    if [[ $picker == tui-shtory ]]; then
-      limit=9999
-    else
-      limit=0
-    fi
+    limit=0
   fi
   if [[ $interactive -eq 1 ]]; then
     if [[ -n $picker ]] && command -v "$picker" >/dev/null 2>&1; then

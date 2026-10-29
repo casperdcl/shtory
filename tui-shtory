@@ -61,8 +61,9 @@ main() {
   h=$(( lines - 2 ))
   padstr=$(printf '%*s' "$w" '')
 
-  local key line filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0
-  local -a shown=()
+  local key line filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0 nlist=0
+  local -a matches=()
+  local list_name=items # recompute points this at matches when a filter is active
   local filter_prev=$'\x01' # sentinel: force the first computation
   # streamed stdin: rows may still be arriving while the TUI is up. A
   # background feeder reads them (buffered, C-speed) and sends
@@ -151,25 +152,30 @@ main() {
     return 1
   }
 
-  # update shown from items. With an active filter, filter only the new
-  # items (re-running the O(rows) filter over the whole list was the
+  # update the visible list from items. With an active filter, filter only
+  # the new items (re-running the O(rows) filter over the whole list was the
   # visible lag per keystroke); a filter change re-filters everything.
+  # list_name points at items (no copy) or matches (filtered subset);
+  # nlist keeps its count fresh for the key handler and render.
   recompute() {
     if [[ -z $filter ]]; then
-      shown=("${items[@]}")
+      list_name=items
       filtered_upto=${#items[@]}
     else
+      list_name=matches
       if [[ $filter != "$filter_prev" ]]; then
-        shown=(); filtered_upto=0
+        matches=(); filtered_upto=0
       fi
       while IFS= read -r line; do
-        shown+=("$line")
+        matches+=("$line")
       done < <(tui_filter "$filter" "${items[@]:$filtered_upto}")
       filtered_upto=${#items[@]}
     fi
-    if (( sel >= ${#shown[@]} )); then
-      if (( ${#shown[@]} > 0 )); then
-        sel=$(( ${#shown[@]} - 1 ))
+    local -n _l=$list_name
+    nlist=${#_l[@]}
+    if (( sel >= nlist )); then
+      if (( nlist > 0 )); then
+        sel=$(( nlist - 1 ))
       else
         sel=0
       fi
@@ -187,17 +193,20 @@ main() {
     prev[i]=' '"$padstr"
   done
   render() {
+    local -n rowlist=$list_name
     local n start d top
     # bottom-anchored window (fzf default layout): the newest visible row
     # sits just above the prompt, older rows above it, oldest scrolled up
     # off the top; scrolling keeps the cursor in the window, pinned to the
     # edge it crossed (fzf --scroll-off=0)
     start=$(( sel - h + 1 < 0 ? 0 : sel - h + 1 ))
-    top=$(( ${#shown[@]} - h < 0 ? 0 : ${#shown[@]} - h ))
+    top=$(( nlist - h < 0 ? 0 : nlist - h ))
     (( start > top )) && start=$top
+    # max length over the visible window only (O(h), not O(rows)); the
+    # horizontal scroll bound is therefore window-relative
     maxl=0
-    for n in "${!shown[@]}"; do
-      d=${shown[n]//$'\t'/  }
+    for (( n = start; n < start + h && n < nlist; n++ )); do
+      d=${rowlist[n]//$'\t'/  }
       if (( ${#d} > maxl )); then
         maxl=${#d}
       fi
@@ -208,11 +217,11 @@ main() {
     local out='' row l r c1 tail b seg pad p2 pad2 n1
     # screen row r (1-based) = item start + h - r; row h+1 = the prompt
     for (( row = 1, n = start + h - 1; n >= start; row++, n-- )); do
-      if (( n >= ${#shown[@]} )); then
+      if (( n >= nlist )); then
         l=' '"$padstr"
       else
         # first field (command) plain, second column onwards dim
-        r=${shown[n]}
+        r=${rowlist[n]}
         if [[ $r == *$'\t'* ]]; then
           c1=${r%%$'\t'*}
           tail=${r#*$'\t'}
@@ -319,7 +328,7 @@ main() {
     case $key in
       $'\x1b[A' | $'\x1bOA')
         # bottom-up list: up = older items (sel+1), down = newer (sel-1)
-        if (( sel < ${#shown[@]} - 1 )); then sel=$(( sel + 1 )); fi ;;
+        if (( sel < nlist - 1 )); then sel=$(( sel + 1 )); fi ;;
       $'\x1b[B' | $'\x1bOB')
         if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
       $'\x1b[D' | $'\x1bOD')
@@ -329,8 +338,9 @@ main() {
       $'\x7f' | $'\b') filter=${filter%?} ;;
       $'\x1b') rc=130; break ;;
       $'\n' | $'\r')
-        if [[ -n ${shown[sel]-} ]]; then
-          printf '%s\n' "${shown[sel]}"
+        local -n keylist=$list_name
+        if [[ -n ${keylist[sel]-} ]]; then
+          printf '%s\n' "${keylist[sel]}"
           rc=0
         fi
         break ;;

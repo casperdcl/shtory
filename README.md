@@ -45,7 +45,7 @@ shtory search [options] [<query>...]
 - `-H`, `--localhost`: filter to current machine
 - `-c`, `--cwd`: filter to current path (`$PWD`)
 - `-s`, `--sort <order>`: `newest` (default), `oldest`, `count` (most common)
-- `-n`, `--limit <n>`: max results default: 9999 in `tui-shtory`, 0 (unlimited) otherwise
+- `-n`, `--limit <n>`: max results, default 0 (unlimited)
 - `-z`, `--zero` / `-Z`, `--nonzero`: exit code filter
 
 `query`:
