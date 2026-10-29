@@ -42,6 +42,16 @@ tui_filter() {
 }
 
 main() {
+  local freeze=0
+  while [[ ${1:-} == --* ]]; do
+    case $1 in
+      --freeze-left=*) freeze=${1#*=} ;;
+      *) echo "tui-shtory: unknown option '$1'" >&2; exit 1 ;;
+    esac
+    shift
+  done
+  [[ $freeze =~ ^[0-9]+$ ]] || { echo "tui-shtory: invalid --freeze-left" >&2; exit 1; }
+
   if ! : > /dev/tty 2>/dev/null; then
     echo "tui-shtory: no tty" >&2
     exit 1
@@ -208,13 +218,48 @@ main() {
     if (( hx > maxl - w )); then
       hx=$(( maxl > w ? maxl - w : 0 ))
     fi
-    local out='' row l r c1 tail b seg pad p2 pad2 n1
+    local out='' row l r c1 tail b seg pad p2 pad2 n1 fz rest rw tmp f
     # screen row r (1-based) shows window[h-r]: the newest visible row at
     # the bottom (row h), oldest at the top (row 1); row h+1 = status, row
     # h+2 = the prompt
     for (( row = 1, i = h - 1; i >= 0; row++, i-- )); do
       if (( i >= wcount )); then
         l=' '"$padstr"
+      elif (( freeze > 0 )); then
+        # freeze-left: first `freeze` tab-delimited fields plain + left-aligned
+        # (always visible); the rest is dim, right-aligned when it fits
+        # (leaving a gap after the frozen part), else left-aligned and clipped
+        # off the right
+        r=${window[i]}
+        fz=''; tmp=$r
+        for (( f = 1; f <= freeze; f++ )); do
+          if [[ $tmp == *$'\t'* ]]; then
+            fz+="${tmp%%$'\t'*}"$'\t'
+            tmp=${tmp#*$'\t'}
+          else
+            fz+=$tmp
+            tmp=''
+            break
+          fi
+        done
+        # keep the boundary tab (separator) only when there is a rest
+        if [[ -z $tmp ]]; then
+          fz=${fz%$'\t'}
+        fi
+        rest=$tmp
+        fz=${fz//$'\t'/  }
+        rest=${rest//$'\t'/  }
+        rw=$(( w - ${#fz} ))
+        if (( ${#rest} <= rw )); then
+          rest="${padstr:0:$(( rw - ${#rest} ))}$rest"
+        else
+          rest=${rest:0:rw}
+        fi
+        if (( i == seli )); then
+          l=$'\e[7m '"$fz"$'\e[7;2m'"$rest"$'\e[0m'
+        else
+          l=' '"$fz"$'\e[2m'"$rest"$'\e[0m'
+        fi
       else
         # first field (command) plain, second column onwards dim
         r=${window[i]}
@@ -382,4 +427,4 @@ main() {
 }
 
 # main guard: sourceable (tests use tui_filter) without running the picker
-[[ ${BASH_SOURCE[0]} == "$0" ]] && main
+[[ ${BASH_SOURCE[0]} == "$0" ]] && main "$@"
