@@ -46,16 +46,24 @@ for a in "${args[@]}"; do
 done
 # pull: no '--', host:src present; push: files after '--'
 if [[ $has_dd -eq 0 && -n $src_arg ]]; then
-  h=${src_arg%%:*}; dest=${args[-1]}; n=0
+  h=${src_arg%%:*}; dest=${args[-1]}; n=0; m=0
   src="$FAKE_REMOTE/$h"; [[ -d $src ]] || src=$FAKE_REMOTE
   for f in "$src"/.bash_history.*.jsonl; do
     [[ -e $f ]] || continue
-    cp "$f" "$dest/" && n=$((n + 1))
+    m=$((m + 1))
+    b=${f##*/}; d="$dest/$b"
+    # model rsync quick check: skip when size + mtime match
+    if [[ -f $d && $(stat -c %s -- "$f") -eq $(stat -c %s -- "$d") \
+      && $(stat -c %Y -- "$f") -eq $(stat -c %Y -- "$d") ]]; then
+      continue
+    fi
+    cp -p "$f" "$dest/" && n=$((n + 1))
+    [[ -n ${PULL_LOG:-} ]] && echo "pull $h $b" >> "$PULL_LOG"
   done
   if [[ -n ${FAKE_RSYNC_PARTIAL:-} ]] && grep -qx "$h" "$FAKE_RSYNC_PARTIAL"; then
     exit 23
   fi
-  exit $((n == 0))
+  exit $((m == 0))
 fi
 i=0
 while [[ ${args[i]-} != -- && $i -lt ${#args[@]} ]]; do i=$((i + 1)); done
@@ -64,7 +72,15 @@ h=${args[-1]%%:*}
 dest=$FAKE_REMOTE
 [[ -d $dest/$h ]] && dest=$dest/$h
 files=("${args[@]:i + 1: ${#args[@]} - i - 2}")
-for f in "${files[@]}"; do cp "$f" "$dest/"; done
+for f in "${files[@]}"; do
+  b=${f##*/}; d="$dest/$b"
+  if [[ -f $d && $(stat -c %s -- "$f") -eq $(stat -c %s -- "$d") \
+    && $(stat -c %Y -- "$f") -eq $(stat -c %Y -- "$d") ]]; then
+    continue
+  fi
+  cp -p "$f" "$dest/"
+  [[ -n ${PUSH_LOG:-} ]] && echo "push $h $b" >> "$PUSH_LOG"
+done
 exit 0
 EOF
 chmod +x "$SHIM/ssh" "$SHIM/rsync"
@@ -192,6 +208,7 @@ L5=$T/name_home; R5=$T/name_remote
 mkdir -p "$L5" "$R5/alx"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L5/.bash_history.realhost.jsonl"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R5/alx/.bash_history.realhost.jsonl"
+touch -d '2020-01-01' "$R5/alx/.bash_history.realhost.jsonl"   # same size, different content: force mtime mismatch
 printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L5/.bash_history.other2.jsonl"
 printf 'alx\n' > "$T/ssh_hosts6"
 printf 'alx realhost\n' > "$T/hostnames"
@@ -225,6 +242,7 @@ L6=$T/partial_home; R6=$T/partial_remote
 mkdir -p "$L6" "$R6/part"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-extra"}' > "$L6/.bash_history.part.jsonl"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-extra"}' > "$R6/part/.bash_history.part.jsonl"
+touch -d '2020-01-01' "$R6/part/.bash_history.part.jsonl"   # same size, different content: force mtime mismatch
 printf 'part\n' > "$T/ssh_hosts7"
 printf 'part\n' > "$T/partial_hosts"
 out=$(
@@ -234,3 +252,17 @@ out=$(
 assert_eq "partial pull: merged what arrived" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-extra"}\n{"t":30,"d":"/x","e":0,"c":"local-extra"}' \
   "$(cat "$L6/.bash_history.part.jsonl")"
 [[ $out == *"pull incomplete (rsync 23)"* ]] && ok "partial pull: warned" || bad "partial pull: warned ($out)"
+
+# sync: unchanged files are not re-transferred (rsync quick check, pull & push)
+L8=$T/nt_home; R8=$T/nt_remote
+mkdir -p "$L8" "$R8/nt"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"same"}' > "$L8/.bash_history.nt.jsonl"
+printf '%s\n' '{"t":2,"d":"/x","e":0,"c":"other"}' > "$L8/.bash_history.other.jsonl"
+cp -p "$L8"/.bash_history.*.jsonl "$R8/nt/"   # remote identical, same size + mtime
+printf 'nt\n' > "$T/ssh_hosts9"
+: > "$T/nt_log"
+(
+  HOME=$L8 FAKE_REMOTE=$R8 FAKE_SSH_HOSTS=$T/ssh_hosts9 PULL_LOG="$T/nt_log" PUSH_LOG="$T/nt_log" SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync nt
+) >/dev/null 2>&1
+if [[ -s $T/nt_log ]]; then bad "unchanged files not re-transferred ($(tr '\n' ' ' < "$T/nt_log"))"; else ok "unchanged files not re-transferred"; fi

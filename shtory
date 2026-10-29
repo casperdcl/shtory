@@ -488,8 +488,14 @@ ssh_config_host() {
 
 # pull all of $1's history files into $2 (a per-host dir)
 sync_pull() {
-  local h=$1 dest=$2 rc=0
+  local h=$1 dest=$2 rc=0 f
   mkdir -p "$dest"
+  # seed with local copies so rsync's quick check skips files the remote hasn't changed
+  shopt -s nullglob
+  for f in "$HOME"/.bash_history.*.jsonl; do
+    cp -p -- "$f" "$dest/"
+  done
+  shopt -u nullglob
   rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" 2>/dev/null || rc=$?
   if (( rc == 0 )); then
     return 0
@@ -521,7 +527,11 @@ sync_merge() {
       | jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]' \
       | drop_stale \
       > "$tmp"; then
-      mv "$tmp" "$HOME/$base"
+      if cmp -s -- "$HOME/$base" "$tmp"; then
+        rm -f -- "$tmp" # unchanged: keep in-place mtime so the next push is a no-op
+      else
+        mv -- "$tmp" "$HOME/$base"
+      fi
     else
       rm -f "$tmp"
       echo "shtory: merge of $base failed" >&2
