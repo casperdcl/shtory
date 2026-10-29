@@ -10,15 +10,10 @@
 # Exit codes: 0 selected, 130 cancelled (as fzf), 1 error.
 set -uo pipefail
 
-# case-insensitive in-order word filter (empty $1 passes everything);
-# a grep -E .*w1.*w2.* pattern: one C-speed process instead of a bash loop
-tui_filter() {
+# build the case-insensitive in-order word filter regex from $1's words:
+# a grep -E .*w1.*w2.* pattern (one C-speed process instead of a bash loop)
+filter_pattern() {
   local words=$1 w c i esc pat='.*'
-  (( $# > 1 )) || return 0
-  if [[ -z $words ]]; then
-    printf '%s\n' "${@:2}"
-    return 0
-  fi
   for w in $words; do  # shellcheck disable=SC2086 # word splitting intended
     esc=''
     for (( i = 0; i < ${#w}; i++ )); do
@@ -30,11 +25,23 @@ tui_filter() {
     done
     pat+="$esc.*"
   done
+  printf '%s' "$pat"
+}
+
+# case-insensitive in-order word filter (empty $1 passes everything);
+# kept for tests - pipes items through grep at C speed
+tui_filter() {
+  local words=$1 pat
+  (( $# > 1 )) || return 0
+  if [[ -z $words ]]; then
+    printf '%s\n' "${@:2}"
+    return 0
+  fi
+  pat=$(filter_pattern "$words")
   printf '%s\n' "${@:2}" | grep -iE -e "$pat"
 }
 
 main() {
-  local -a items=()
   if ! : > /dev/tty 2>/dev/null; then
     echo "tui-shtory: no tty" >&2
     exit 1
@@ -62,31 +69,25 @@ main() {
   padstr=$(printf '%*s' "$w" '')
   dashstr=$(printf '\u2500%.0s' $(seq 1 $(( w + 4 ))))
 
-  local key line filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0 nlist=0
-  local -a matches=()
-  local list_name=items # recompute points this at matches when a filter is active
+  local key filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0 nlist=0 nloaded=0
+  local batch='' pending='' quit=0 i c
   local filter_prev=$'\x01' # sentinel: force the first computation
   # streamed stdin: rows may still be arriving while the TUI is up. A
-  # background feeder reads them (buffered, C-speed) and sends
-  # sentinel-delimited batches over a FIFO, one unacked batch at a time (a
-  # batch must fit the pipe buffer while the main loop is busy); the main
-  # loop polls the tty with a short timeout and drains pending batches each
-  # pass. No signals: bash's read-with-trapped-USR1 restarts/delays
-  # nondeterministically, and a blocking `read` on the stream itself drains
-  # byte-by-byte and stalls key input for seconds. (Background jobs in a
-  # non-interactive shell get stdin from /dev/null, so the stream is kept
-  # on fd 6 for the feeder.)
-  local tmpd fifo ackf mark eof sentinel
+  # background feeder reads them (fd 6) and appends them to a file
+  # (itemsfile), publishing the cumulative line count after each batch. The
+  # main loop polls the tty (never the stream: a blocking read on the stream
+  # stalled key input for seconds - the original input starvation) and
+  # notices new rows by watching the count.
+  # The list is a file, not a bash array: a 100k-element array per keystroke
+  # was the O(rows) search cost. A filter is a grep of the file (C-speed);
+  # only the visible h-row window is materialised per frame (sed).
+  local tmpd itemsfile matchesfile activefile countfile eof
   tmpd=$(mktemp -d) || exit 1
-  fifo="$tmpd/batch"; ackf="$tmpd/ack"; mark="$tmpd/mark"; eof="$tmpd/eof"
-  if ! mkfifo "$fifo" || ! mkfifo "$ackf"; then
-    rm -rf "$tmpd"
-    exit 1
-  fi
-  : > "$mark"
-  sentinel="shtory-batch-$$_$RANDOM"
-  exec 3<> "$fifo" 4> "$fifo" 5<> "$ackf" 6<&0
-  local stdin_open=1 dirty=1 filtered_upto=0 feeder_pid=''
+  itemsfile="$tmpd/items"; matchesfile="$tmpd/matches"; countfile="$tmpd/count"; eof="$tmpd/eof"
+  : > "$itemsfile"; printf 0 > "$countfile"
+  activefile=$itemsfile
+  exec 6<&0
+  local stdin_open=1 dirty=1 feeder_pid='' changed=1 last_count=0 cur=0
   saved=$(stty -g < /dev/tty 2>/dev/null) || saved=''
   # shellcheck disable=SC2329,SC2317 # invoked via trap
   restore_tty() {
@@ -118,62 +119,47 @@ main() {
   # only changed lines, so no per-frame erase/redraw
   printf '\e[2J\e[?25l' > /dev/tty
 
-  # read the stream (fd 6) and send batches; flush at 256 lines or 16KB
-  # (a batch must fit the pipe buffer while the main loop is between
-  # batches), then block on the main loop's ack before sending the next
+  # read the stream (fd 6) and append it to itemsfile in batches; publish
+  # the cumulative line count after each batch (the main loop watches it).
+  # Fully async: the main loop never reads the stream, so key input is never
+  # starved. A batch is 1024 lines or 48KB.
   feeder() {
-    local l batch='' n=0 final=0
-    send() {
-      printf '%s%s\n' "$batch" "$sentinel" >&4
+    local l batch='' n=0 total=0 final=0
+    flush() {
+      if [[ -n $batch ]]; then
+        printf '%s' "$batch" >> "$itemsfile"
+        total=$(( total + n ))
+        printf '%s\n' "$total" > "$countfile"
+      fi
       batch=''; n=0
-      printf x >> "$mark"
       (( final )) && touch "$eof"
-      read -rs -N 1 -u 5 # block on the main loop's ack (byte -> REPLY)
     }
     while IFS= read -r -u 6 l || [[ -n $l ]]; do
       batch+="$l"$'\n'; n=$(( n + 1 ))
-      if (( n >= 256 || ${#batch} >= 16384 )); then
-        send
+      if (( n >= 1024 || ${#batch} >= 49152 )); then
+        flush
       fi
     done
-    final=1 # terminal batch (empty if the stream ran dry) = stream over
-    send
+    final=1 # terminal flush (empty if the stream ran dry) = stream over
+    flush
   }
+  feeder &
+  feeder_pid=$!
 
-  # one batch is guaranteed to be in the FIFO (ack handshake); drop items
-  # up to the sentinel
-  drain_batch() {
-    local l
-    while IFS= read -r -u 3 l; do
-      if [[ $l == "$sentinel" ]]; then
-        return 0
-      fi
-      items+=("$l"); dirty=1
-    done
-    return 1
-  }
-
-  # update the visible list from items. With an active filter, filter only
-  # the new items (re-running the O(rows) filter over the whole list was the
-  # visible lag per keystroke); a filter change re-filters everything.
-  # list_name points at items (no copy) or matches (filtered subset);
-  # nlist keeps its count fresh for the key handler and render.
+  # point activefile at the items file (no filter) or a fresh grep of it
+  # (filter active); keep nlist = its line count fresh for the key handler
+  # and render. The list is a file, not a bash array: a 100k-element array
+  # per keystroke was the O(rows) search cost, whereas grep + a per-frame
+  # h-row window extract is C-speed.
   recompute() {
     if [[ -z $filter ]]; then
-      list_name=items
-      filtered_upto=${#items[@]}
+      activefile=$itemsfile
+      nlist=$nloaded
     else
-      list_name=matches
-      if [[ $filter != "$filter_prev" ]]; then
-        matches=(); filtered_upto=0
-      fi
-      while IFS= read -r line; do
-        matches+=("$line")
-      done < <(tui_filter "$filter" "${items[@]:$filtered_upto}")
-      filtered_upto=${#items[@]}
+      grep -iE -e "$(filter_pattern "$filter")" "$itemsfile" > "$matchesfile"
+      activefile=$matchesfile
+      nlist=$(wc -l < "$matchesfile"); nlist=${nlist//[!0-9]/}
     fi
-    local -n _l=$list_name
-    nlist=${#_l[@]}
     if (( sel >= nlist )); then
       if (( nlist > 0 )); then
         sel=$(( nlist - 1 ))
@@ -194,8 +180,7 @@ main() {
     prev[i]=' '"$padstr"
   done
   render() {
-    local -n rowlist=$list_name
-    local n start d top
+    local start top i d
     # bottom-anchored window (fzf default layout): the newest visible row
     # sits just above the prompt, older rows above it, oldest scrolled up
     # off the top; scrolling keeps the cursor in the window, pinned to the
@@ -203,11 +188,19 @@ main() {
     start=$(( sel - h + 1 < 0 ? 0 : sel - h + 1 ))
     top=$(( nlist - h < 0 ? 0 : nlist - h ))
     (( start > top )) && start=$top
+    # materialise only the visible h rows (sed + mapfile, C-speed); the
+    # window is stable while rows stream in at the newest end, so a
+    # streaming load neither flickers nor re-scans the whole file
+    local -a window=()
+    if (( nlist > 0 )); then
+      mapfile -t window < <(sed -n "$(( start + 1 )),$(( start + h ))p" "$activefile")
+    fi
+    local wcount=${#window[@]} seli=$(( sel - start ))
     # max length over the visible window only (O(h), not O(rows)); the
     # horizontal scroll bound is therefore window-relative
     maxl=0
-    for (( n = start; n < start + h && n < nlist; n++ )); do
-      d=${rowlist[n]//$'\t'/  }
+    for (( i = 0; i < wcount; i++ )); do
+      d=${window[i]//$'\t'/  }
       if (( ${#d} > maxl )); then
         maxl=${#d}
       fi
@@ -216,14 +209,15 @@ main() {
       hx=$(( maxl > w ? maxl - w : 0 ))
     fi
     local out='' row l r c1 tail b seg pad p2 pad2 n1
-    # screen row r (1-based) = item start + h - r; row h+1 = status, row
+    # screen row r (1-based) shows window[h-r]: the newest visible row at
+    # the bottom (row h), oldest at the top (row 1); row h+1 = status, row
     # h+2 = the prompt
-    for (( row = 1, n = start + h - 1; n >= start; row++, n-- )); do
-      if (( n >= nlist )); then
+    for (( row = 1, i = h - 1; i >= 0; row++, i-- )); do
+      if (( i >= wcount )); then
         l=' '"$padstr"
       else
         # first field (command) plain, second column onwards dim
-        r=${rowlist[n]}
+        r=${window[i]}
         if [[ $r == *$'\t'* ]]; then
           c1=${r%%$'\t'*}
           tail=${r#*$'\t'}
@@ -236,13 +230,13 @@ main() {
         seg=${d:hx:w}
         pad=${padstr:0:$(( w - ${#seg} ))}
         if [[ -z $b ]] || (( hx + w <= b )); then
-          if (( n == sel )); then
+          if (( i == seli )); then
             l=$'\e[7m '"$seg$pad"$'\e[0m'
           else
             l=' '"$seg$pad"
           fi
         elif (( hx >= b )); then
-          if (( n == sel )); then
+          if (( i == seli )); then
             l=' '$'\e[7;2m'"$seg$pad"$'\e[0m'
           else
             l=' '$'\e[2m'"$seg$pad"$'\e[0m'
@@ -251,7 +245,7 @@ main() {
           n1=$(( b - hx ))
           p2=${d:hx+n1:w-n1}
           pad2=${padstr:0:$(( w - n1 - ${#p2} ))}
-          if (( n == sel )); then
+          if (( i == seli )); then
             l=$'\e[7m '"${d:hx:n1}"$'\e[7;2m'"$p2$pad2"$'\e[0m'
           else
             l=' '"${d:hx:n1}"$'\e[2m'"$p2$pad2"$'\e[0m'
@@ -266,7 +260,7 @@ main() {
     # status row just above the prompt (like fzf): matches/loaded plus a
     # box-drawing line to the end of the screen; cursor is hidden, so pad
     # every row to m (a shorter rewrite would leave stale characters)
-    l=" ${nlist}/${#items[@]} "
+    l=" ${nlist}/${nloaded} "
     l+="${dashstr:0:$(( m - ${#l} ))}"
     if [[ $l != "${prev[h]}" ]]; then
       out+=$'\e['$(( h + 1 ))';1H'"${l:0:m}"
@@ -282,22 +276,20 @@ main() {
     [[ -n $out ]] && printf '%s' "$out" > /dev/tty
   }
 
-  local changed=1
-  feeder &
-  feeder_pid=$!
   while :; do
     if (( stdin_open )); then
-      # drain every batch the feeder has sent (mark: one byte per batch)
-      while [[ -s $mark ]]; do
-        if ! drain_batch; then
-          break
-        fi
-        : > "$mark"
-        printf a >&5
-      done
+      # notice new rows: the feeder publishes the cumulative count after
+      # each batch (O(1) read; the main loop never reads the stream)
+      IFS= read -r cur < "$countfile" || cur=0
+      cur=${cur:-0}
+      if (( cur != last_count )); then
+        nloaded=$cur
+        last_count=$cur
+        dirty=1
+      fi
       if [[ -e $eof ]]; then
         stdin_open=0
-        if (( ${#items[@]} == 0 )); then
+        if (( nloaded == 0 )); then
           exit 1
         fi
       fi
@@ -312,50 +304,79 @@ main() {
       render
       changed=0
     fi
-    # poll the tty (never the stream: that was the input starvation)
+    # poll the tty (never the stream: that was the input starvation). Read a
+    # whole buffer of pending bytes in one go and reassemble CSI sequences
+    # with a pending-ESC state machine (like fzf). A held arrow streams
+    # ESC [ A ESC [ A ...; reading one byte then blocking for the rest split
+    # that stream and leaked literal [A into the filter. A lone ESC at the
+    # end of a buffer is held (pending) for the next read instead of
+    # cancelling immediately, so a slow/ssh split still reassembles
     rc=0
-    read -rs -N 1 -t 0.05 key < /dev/tty || rc=$?
-    if (( rc > 128 )); then
-      continue
-    fi
-    if (( rc )); then
+    read -rs -N 64 -t 0.005 batch < /dev/tty || rc=$?
+    if (( rc == 1 )); then   # EOF: the tty closed
       rc=1; break
     fi
-    # any handled key may change what must be shown (arrows move sel/hx)
+    [[ -z $batch ]] && continue
     changed=1
-    if [[ $key == $'\x1b' ]]; then
-      # arrows arrive as 3-byte CSI sequences; read exactly one so a fast
-      # next keystroke is not swallowed into this one
-      local k2 k3
-      if IFS= read -rs -N 1 -t 0.02 k2 < /dev/tty; then
-        if [[ $k2 == '[' || $k2 == 'O' ]]; then
-          IFS= read -rs -N 1 -t 0.02 k3 < /dev/tty && key+=$k2$k3
+    quit=0
+    for (( i = 0; i < ${#batch}; i++ )); do
+      (( quit )) && break
+      c=${batch:i:1}
+      key=''
+      if [[ $pending == $'\x1b' ]]; then
+        # waiting for a CSI prefix ([ or O) after a lone ESC
+        if [[ $c == '[' || $c == 'O' ]]; then
+          pending+=$c; continue
+        fi
+        rc=130; quit=1; pending=''; continue   # not a CSI: lone ESC -> cancel
+      elif [[ -n $pending ]]; then
+        # pending is ESC[ or ESCO, waiting for the final (A/B/C/D)
+        if [[ $c == [ABCD] ]]; then
+          key=$pending$c; pending=''
         else
-          key=$'\x1b'
+          pending=''   # not a final: the prefix was stray; reprocess c fresh
         fi
       fi
-    fi
-    case $key in
-      $'\x1b[A' | $'\x1bOA')
-        # bottom-up list: up = older items (sel+1), down = newer (sel-1)
-        if (( sel < nlist - 1 )); then sel=$(( sel + 1 )); fi ;;
-      $'\x1b[B' | $'\x1bOB')
-        if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
-      $'\x1b[D' | $'\x1bOD')
-        if (( hx > 0 )); then hx=$(( hx - 1 )); fi ;;
-      $'\x1b[C' | $'\x1bOC')
-        if (( hx < maxl - w )); then hx=$(( hx + 1 )); fi ;;
-      $'\x7f' | $'\b') filter=${filter%?} ;;
-      $'\x1b') rc=130; break ;;
-      $'\n' | $'\r')
-        local -n keylist=$list_name
-        if [[ -n ${keylist[sel]-} ]]; then
-          printf '%s\n' "${keylist[sel]}"
-          rc=0
+      if [[ -z $key ]]; then
+        # a fresh byte
+        if [[ $c == $'\x1b' ]]; then
+          pending=$'\x1b'; continue
+        elif [[ $c == '[' || $c == 'O' ]]; then
+          continue   # stray prefix (no preceding ESC)
         fi
-        break ;;
-      *) if [[ ${key:0:1} != [[:cntrl:]] ]]; then filter+=$key; fi ;;
-    esac
+        key=$c
+      fi
+      case $key in
+        $'\x1b[A' | $'\x1bOA')
+          # bottom-up list: up = older items (sel+1), down = newer (sel-1)
+          if (( sel < nlist - 1 )); then sel=$(( sel + 1 )); fi ;;
+        $'\x1b[B' | $'\x1bOB')
+          if (( sel > 0 )); then sel=$(( sel - 1 )); fi ;;
+        $'\x1b[D' | $'\x1bOD')
+          if (( hx > 0 )); then hx=$(( hx - 1 )); fi ;;
+        $'\x1b[C' | $'\x1bOC')
+          if (( hx < maxl - w )); then hx=$(( hx + 1 )); fi ;;
+        $'\x7f' | $'\b') filter=${filter%?} ;;
+        $'\x1b') rc=130; quit=1 ;;
+        $'\n' | $'\r')
+          if (( sel < nlist )); then
+            printf '%s\n' "$(sed -n "$(( sel + 1 ))p" "$activefile")"
+            rc=0
+          fi
+          quit=1 ;;
+        *) if [[ ${key:0:1} != [[:cntrl:]] ]]; then filter+=$key; fi ;;
+      esac
+      pending=''
+      # a filter change must be recomputed before any later key in this same
+      # batch (e.g. a buffered "a\n") selects, so the select sees the fresh
+      # activefile/nlist (one key per iteration used to do this implicitly)
+      if [[ $filter != "$filter_prev" ]]; then
+        recompute
+        filter_prev=$filter
+        changed=1
+      fi
+    done
+    (( quit )) && break
   done
   exit $rc
 }
