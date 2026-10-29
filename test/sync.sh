@@ -1,0 +1,221 @@
+#!/usr/bin/env bash
+# test: sync (shimmed ssh/rsync) (run via ./test.bash; standalone: bash test/sync.sh)
+source ./test/common.sh
+
+echo "# sync (shimmed ssh/rsync)"
+SHIM=$T/shim; R=$T/remote; L=$T/rsync_home
+mkdir -p "$SHIM" "$R" "$L"
+cat > "$SHIM/ssh" <<'EOF'
+#!/usr/bin/env bash
+if [[ ${1:-} == -G ]]; then
+  h=$2
+  if grep -qx "$h" "${FAKE_SSH_HOSTS}"; then
+    printf 'user root\nhostname %s.resolved\n' "$h"
+  else
+    printf 'user root\nhostname %s\n' "$h"
+  fi
+  exit 0
+fi
+h=$1
+a=(); a+=("$@")
+for (( i = 0; i < ${#a[@]}; i++ )); do
+  case ${a[i]} in
+    -o) (( i++ )); continue ;; # skip -o and its value
+    -*) continue ;;
+    *) h=${a[i]}; break ;;
+  esac
+done
+if [[ -n ${FAKE_DOWN:-} ]] && grep -qx "$h" "$FAKE_DOWN"; then
+  exit 255
+fi
+if [[ -n ${FAKE_HOSTNAMES:-} ]] && grep -q "^$h " "$FAKE_HOSTNAMES"; then
+  awk -v h="$h" '$1 == h {print $2}' "$FAKE_HOSTNAMES"
+  exit 0
+fi
+printf '%s\n' "$h"
+exit 0
+EOF
+cat > "$SHIM/rsync" <<'EOF'
+#!/usr/bin/env bash
+args=("$@")
+src_arg=''; has_dd=0
+for a in "${args[@]}"; do
+  [[ $a == -- ]] && has_dd=1
+  [[ $a == -* ]] && continue
+  [[ -z $src_arg && $a == *:* ]] && src_arg=$a
+done
+# pull: no '--', host:src present; push: files after '--'
+if [[ $has_dd -eq 0 && -n $src_arg ]]; then
+  h=${src_arg%%:*}; dest=${args[-1]}; n=0
+  src="$FAKE_REMOTE/$h"; [[ -d $src ]] || src=$FAKE_REMOTE
+  for f in "$src"/.bash_history.*.jsonl; do
+    [[ -e $f ]] || continue
+    cp "$f" "$dest/" && n=$((n + 1))
+  done
+  if [[ -n ${FAKE_RSYNC_PARTIAL:-} ]] && grep -qx "$h" "$FAKE_RSYNC_PARTIAL"; then
+    exit 23
+  fi
+  exit $((n == 0))
+fi
+i=0
+while [[ ${args[i]-} != -- && $i -lt ${#args[@]} ]]; do i=$((i + 1)); done
+[[ ${args[i]-} == -- ]] || exit 1
+h=${args[-1]%%:*}
+dest=$FAKE_REMOTE
+[[ -d $dest/$h ]] && dest=$dest/$h
+files=("${args[@]:i + 1: ${#args[@]} - i - 2}")
+for f in "${files[@]}"; do cp "$f" "$dest/"; done
+exit 0
+EOF
+chmod +x "$SHIM/ssh" "$SHIM/rsync"
+printf '%s\n' '{"t":100,"d":"/a","e":0,"c":"local-only"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' > "$L/.bash_history.localhost.jsonl"
+printf '%s\n' '{"t":200,"d":"/x","e":0,"c":"onA"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' > "$L/.bash_history.fakeA.jsonl"
+chmod 600 "$L/.bash_history.fakeA.jsonl"   # must survive the merge
+printf '%s\n' '{"t":200,"d":"/x","e":0,"c":"onA"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/y","e":1,"c":"remote-only"}' > "$R/.bash_history.fakeA.jsonl"
+printf '%s\n' '{"t":50,"d":"/z","e":0,"c":"fromB"}' > "$R/.bash_history.fakeB.jsonl"
+printf 'fakeA\nfakeB\n' > "$T/ssh_hosts"
+(
+  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts SHTORY_HOSTNAME=me \
+    PATH="$SHIM:$PATH" "$B" sync
+)
+assert_eq "merged union, t-sorted" $'{"t":200,"d":"/x","e":0,"c":"onA"}\n{"t":300,"d":"/a","e":0,"c":"shared"}\n{"t":400,"d":"/y","e":1,"c":"remote-only"}' \
+  "$(cat "$L/.bash_history.fakeA.jsonl")"
+[[ $(stat -c %a "$L/.bash_history.fakeA.jsonl") == 600 ]] && ok "sync merge preserves mode 600" || bad "sync merge preserves mode 600 ($(stat -c %a "$L/.bash_history.fakeA.jsonl"))"
+assert_eq "missing file pulled" '{"t":50,"d":"/z","e":0,"c":"fromB"}' "$(cat "$L/.bash_history.fakeB.jsonl")"
+[[ -f $R/.bash_history.localhost.jsonl ]] && ok "local-only pushed to remote" || bad "local-only pushed to remote"
+md5sum "$L"/.bash_history.*.jsonl > "$T/m1"
+(
+  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts SHTORY_HOSTNAME=me \
+    PATH="$SHIM:$PATH" "$B" sync
+) >/dev/null 2>&1
+md5sum "$L"/.bash_history.*.jsonl > "$T/m2"
+if diff -q "$T/m1" "$T/m2" >/dev/null; then ok "idempotent"; else bad "idempotent"; fi
+out=$(
+  HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts PATH="$SHIM:$PATH" \
+    "$B" sync fakeA 2>&1
+)
+if [[ $out == *fakeA:*synced* && $out != *fakeB* ]]; then ok "explicit <host>: no auto-detect"; else bad "explicit <host>: no auto-detect ($out)"; fi
+
+# auto-detect must skip the local host's own file (it is local, not a remote)
+L4=$T/ad_home; R4=$T/ad_remote
+mkdir -p "$L4" "$R4"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"on-me"}' > "$L4/.bash_history.me.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"stale"}' > "$L4/.bash_history.dev1.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"stale"}' '{"t":2,"d":"/x","e":0,"c":"on-remote"}' > "$R4/.bash_history.dev1.jsonl"
+printf 'dev1\n' > "$T/ssh_hosts5"
+out=$(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync 2>&1
+)
+if [[ $out == *dev1:*synced* && $out != *me* ]]; then ok "auto-detect skips local host"; else bad "auto-detect skips local host ($out)"; fi
+[[ -f $R4/.bash_history.me.jsonl ]] && ok "local file still pushed to remote" || bad "local file still pushed to remote"
+assert_eq "auto-detect: remote file merged locally" $'{"t":1,"d":"/x","e":0,"c":"stale"}\n{"t":2,"d":"/x","e":0,"c":"on-remote"}' \
+  "$(cat "$L4/.bash_history.dev1.jsonl")"
+
+# unreachable host (ssh rc 255) is skipped, not hung on
+out=$(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 FAKE_DOWN=$T/ssh_hosts5 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync dev1 2>&1
+)
+if [[ $out == *dev1:*unreachable* ]]; then ok "unreachable host skipped"; else bad "unreachable host skipped ($out)"; fi
+
+# multi-host: every host must receive the full merge (per-host loop left later hosts stale)
+M=$T/mh_remote
+for h in mA mB mC; do mkdir -p "$M/$h"; done
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' '{"t":2,"d":"/x","e":0,"c":"a2"}' > "$M/mA/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$M/mA/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$M/mA/.bash_history.mC.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$M/mB/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' '{"t":2,"d":"/x","e":0,"c":"b2"}' > "$M/mB/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$M/mB/.bash_history.mC.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$M/mC/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$M/mC/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' '{"t":2,"d":"/x","e":0,"c":"c2"}' > "$M/mC/.bash_history.mC.jsonl"
+MH=$T/mh_home; mkdir -p "$MH"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"a1"}' > "$MH/.bash_history.mA.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"b1"}' > "$MH/.bash_history.mB.jsonl"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"c1"}' > "$MH/.bash_history.mC.jsonl"
+printf 'mA\nmB\nmC\n' > "$T/ssh_hosts4"
+(
+  HOME=$MH FAKE_REMOTE=$M FAKE_SSH_HOSTS=$T/ssh_hosts4 PATH="$SHIM:$PATH" \
+  "$B" sync mA mB mC
+) >/dev/null 2>&1
+assert_eq "multi-host: mA got mC's new line" $'{"t":1,"d":"/x","e":0,"c":"c1"}\n{"t":2,"d":"/x","e":0,"c":"c2"}' \
+  "$(cat "$M/mA/.bash_history.mC.jsonl")"
+assert_eq "multi-host: mC got mB's new line" $'{"t":1,"d":"/x","e":0,"c":"b1"}\n{"t":2,"d":"/x","e":0,"c":"b2"}' \
+  "$(cat "$M/mC/.bash_history.mB.jsonl")"
+assert_eq "multi-host: local merged everything" $'{"t":1,"d":"/x","e":0,"c":"a1"}\n{"t":2,"d":"/x","e":0,"c":"a2"}' \
+  "$(cat "$MH/.bash_history.mA.jsonl")"
+
+# sync --compact
+L3=$T/cp_home; R3=$T/cp_remote
+mkdir -p "$L3" "$R3"
+printf '%s\n' '{"t":100,"d":"/a","e":0,"c":"old1"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/a","e":0,"c":"new"}' > "$L3/.bash_history.hostX.jsonl"
+printf '%s\n' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":400,"d":"/a","e":0,"c":"new"}' '{"t":500,"d":"/a","e":0,"c":"remote-new"}' > "$R3/.bash_history.hostX.jsonl"
+printf '%s\n' '{"t":50,"d":"/z","e":0,"c":"local-only"}' > "$L3/.bash_history.other.jsonl"
+printf 'hostX\n' > "$T/ssh_hosts3"
+(
+  HOME=$L3 FAKE_REMOTE=$R3 FAKE_SSH_HOSTS=$T/ssh_hosts3 PATH="$SHIM:$PATH" \
+  "$B" sync --compact 2 hostX
+) >/dev/null 2>&1
+assert_eq "sync --compact: merged then capped to newest N" $'{"t":400,"d":"/a","e":0,"c":"new"}\n{"t":500,"d":"/a","e":0,"c":"remote-new"}' \
+  "$(cat "$L3/.bash_history.hostX.jsonl")"
+assert_eq "sync --compact: push carries compacted files" '{"t":50,"d":"/z","e":0,"c":"local-only"}' \
+  "$(cat "$R3/.bash_history.other.jsonl")"
+assert_eq "sync --compact implies --self: own file pushed compacted" $'{"t":400,"d":"/a","e":0,"c":"new"}\n{"t":500,"d":"/a","e":0,"c":"remote-new"}' \
+  "$(cat "$R3/.bash_history.hostX.jsonl")"
+HOME=$L3 "$B" sync --compact abc hostX >/dev/null 2>&1; assert_rc "sync --compact bad N rc 2" 2 $?
+HOME=$L3 "$B" sync --compact >/dev/null 2>&1; assert_rc "sync --compact requires N" 1 $?
+
+# sync --self
+L4=$T/self_home; R4=$T/self_remote
+mkdir -p "$L4" "$R4"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L4/.bash_history.hostY.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R4/.bash_history.hostY.jsonl"
+printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L4/.bash_history.other2.jsonl"
+printf 'hostY\n' > "$T/ssh_hosts5"
+(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 PATH="$SHIM:$PATH" \
+  "$B" sync hostY
+) >/dev/null 2>&1
+assert_eq "sync: own file not pushed by default" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}' \
+  "$(cat "$R4/.bash_history.hostY.jsonl")"
+(
+  HOME=$L4 FAKE_REMOTE=$R4 FAKE_SSH_HOSTS=$T/ssh_hosts5 PATH="$SHIM:$PATH" \
+  "$B" sync --self hostY
+) >/dev/null 2>&1
+assert_eq "sync --self: own file pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
+  "$(cat "$R4/.bash_history.hostY.jsonl")"
+
+# sync: host's reported name differs from the ssh alias
+L5=$T/name_home; R5=$T/name_remote
+mkdir -p "$L5" "$R5/alx"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L5/.bash_history.realhost.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R5/alx/.bash_history.realhost.jsonl"
+printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L5/.bash_history.other2.jsonl"
+printf 'alx\n' > "$T/ssh_hosts6"
+printf 'alx realhost\n' > "$T/hostnames"
+(
+  HOME=$L5 FAKE_REMOTE=$R5 FAKE_SSH_HOSTS=$T/ssh_hosts6 FAKE_HOSTNAMES=$T/hostnames PATH="$SHIM:$PATH" \
+  "$B" sync alx
+) >/dev/null 2>&1
+assert_eq "name mismatch: own file (by reported name) not pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}' \
+  "$(cat "$R5/alx/.bash_history.realhost.jsonl")"
+assert_eq "name mismatch: local merged" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}\n{"t":30,"d":"/x","e":0,"c":"local-only"}' \
+  "$(cat "$L5/.bash_history.realhost.jsonl")"
+[[ -f $R5/alx/.bash_history.other2.jsonl ]] && ok "name mismatch: other files still pushed" || bad "name mismatch: other files still pushed"
+
+# sync: partial pull (rsync 23) merges what arrived, with a warning
+L6=$T/partial_home; R6=$T/partial_remote
+mkdir -p "$L6" "$R6/part"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-extra"}' > "$L6/.bash_history.part.jsonl"
+printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-extra"}' > "$R6/part/.bash_history.part.jsonl"
+printf 'part\n' > "$T/ssh_hosts7"
+printf 'part\n' > "$T/partial_hosts"
+out=$(
+  HOME=$L6 FAKE_REMOTE=$R6 FAKE_SSH_HOSTS=$T/ssh_hosts7 FAKE_RSYNC_PARTIAL=$T/partial_hosts PATH="$SHIM:$PATH" \
+  "$B" sync part 2>&1
+)
+assert_eq "partial pull: merged what arrived" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-extra"}\n{"t":30,"d":"/x","e":0,"c":"local-extra"}' \
+  "$(cat "$L6/.bash_history.part.jsonl")"
+[[ $out == *"pull incomplete (rsync 23)"* ]] && ok "partial pull: warned" || bad "partial pull: warned ($out)"
