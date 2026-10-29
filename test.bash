@@ -488,6 +488,25 @@ else
     "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows" /dev/null 2>/dev/null | tr -d '\r')
   [[ $(lastline "$out") == *"alpha cmd"* ]] && ok "pty: tui-shtory filters & selects" || bad "pty: tui-shtory filters & selects ($(lastline "$out"))"
 
+  # tui-shtory streaming: the TUI is interactive before stdin delivers rows
+  # (Enter before the row arrives selects nothing; a buffered picker would
+  # wait for EOF and select the row)
+  cat > "$T/tui_slow.sh" <<'EOF'
+#!/usr/bin/env bash
+{ sleep 0.5; printf 'gamma cmd\n'; sleep 0.3; } | "$1"
+EOF
+  out=$( { sleep 0.2; printf '\r'; sleep 1.5; } | \
+    SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
+    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; bash $T/tui_slow.sh $TUI" /dev/null 2>/dev/null | tr -d '\r')
+  [[ $out == *$'\e[?1049h'* && $out != *"gamma cmd"* ]] && ok "pty: tui-shtory interactive before rows arrive" || bad "pty: tui-shtory interactive before rows arrive"
+
+  # tui-shtory: arrow keys re-render (the inverted row follows sel)
+  printf 'alpha x\nbeta x\n' > "$T/tui_rows2"
+  out=$( { sleep 0.7; printf '\x1b[B'; sleep 0.3; printf '\r'; } | \
+    SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
+    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows2" /dev/null 2>/dev/null | tr -d '\r')
+  [[ $out == *$'\e[7m beta'* ]] && ok "pty: tui-shtory arrow re-renders" || bad "pty: tui-shtory arrow re-renders"
+
   # HISTCONTROL: the hook mirrors bash's history list, so ignoredups/ignorespace/
   # ignoreboth/erasedups are respected; input lines are spaced out (all-at-once
   # pty input is read ahead before the first prompt)
