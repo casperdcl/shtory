@@ -55,11 +55,12 @@ main() {
   # against a +/-1 winsize error): no wrap, no stale tails, and no \e[K,
   # which Termux mishandles on pending-wrap lines (termux-app#3549). Rows
   # end in \r\n: in raw mode a bare \n is a line-feed without CR.
-  local m w h padstr
+  local m w h padstr dashstr
   m=$(( cols - 1 ))
   w=$(( m - 1 ))
   h=$(( lines - 2 ))
   padstr=$(printf '%*s' "$w" '')
+  dashstr=$(printf '\u2500%.0s' $(seq 1 $(( w + 4 ))))
 
   local key line filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0 nlist=0
   local -a matches=()
@@ -189,7 +190,7 @@ main() {
   # Every row is exactly m chars (padding covers stale content, so no
   # \e[K), and the hidden cursor makes its position between writes moot.
   local -a prev=()
-  for (( i = 0; i < h + 1; i++ )); do
+  for (( i = 0; i < h + 2; i++ )); do
     prev[i]=' '"$padstr"
   done
   render() {
@@ -215,7 +216,8 @@ main() {
       hx=$(( maxl > w ? maxl - w : 0 ))
     fi
     local out='' row l r c1 tail b seg pad p2 pad2 n1
-    # screen row r (1-based) = item start + h - r; row h+1 = the prompt
+    # screen row r (1-based) = item start + h - r; row h+1 = status, row
+    # h+2 = the prompt
     for (( row = 1, n = start + h - 1; n >= start; row++, n-- )); do
       if (( n >= nlist )); then
         l=' '"$padstr"
@@ -261,13 +263,21 @@ main() {
         prev[row-1]=$l
       fi
     done
-    # prompt row: cursor is hidden, so pad to m like the other rows (a
-    # shorter rewrite would leave stale characters)
-    l=' '${filter:0:m-1}
-    l+="${padstr:0:$(( m - ${#l} ))}"
+    # status row just above the prompt (like fzf): matches/loaded plus a
+    # box-drawing line to the end of the screen; cursor is hidden, so pad
+    # every row to m (a shorter rewrite would leave stale characters)
+    l=" ${nlist}/${#items[@]} "
+    l+="${dashstr:0:$(( m - ${#l} ))}"
     if [[ $l != "${prev[h]}" ]]; then
-      out+=$'\e['$(( h + 1 ))';1H'"$l"
+      out+=$'\e['$(( h + 1 ))';1H'"${l:0:m}"
       prev[h]=$l
+    fi
+    # prompt row
+    l="> ${filter:0:m-2}"
+    l+="${padstr:0:$(( m - ${#l} ))}"
+    if [[ $l != "${prev[h+1]}" ]]; then
+      out+=$'\e['$(( h + 2 ))';1H'"${l:0:m}"
+      prev[h+1]=$l
     fi
     [[ -n $out ]] && printf '%s' "$out" > /dev/tty
   }
