@@ -205,6 +205,21 @@ assert_eq "name mismatch: local merged" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n
   "$(cat "$L5/.bash_history.realhost.jsonl")"
 [[ -f $R5/alx/.bash_history.other2.jsonl ]] && ok "name mismatch: other files still pushed" || bad "name mismatch: other files still pushed"
 
+# plain sync trims stale t:0 imports (import_history's dedup, re-run on the merged union)
+L7=$T/stale_home; R7=$T/stale_remote
+mkdir -p "$L7" "$R7/h7"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"stale"}' '{"t":0,"d":"","e":0,"c":"kept"}' > "$L7/.bash_history.me.jsonl"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"stale"}' '{"t":0,"d":"","e":0,"c":"kept"}' '{"t":1,"d":"/x","e":0,"c":"stale"}' > "$R7/h7/.bash_history.me.jsonl"
+printf 'h7\n' > "$T/ssh_hosts8"
+(
+  HOME=$L7 FAKE_REMOTE=$R7 FAKE_SSH_HOSTS=$T/ssh_hosts8 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync h7
+) >/dev/null 2>&1
+assert_eq "sync trims stale t:0 (live counterpart in same file)" $'{"t":0,"d":"","e":0,"c":"kept"}\n{"t":1,"d":"/x","e":0,"c":"stale"}' \
+  "$(cat "$L7/.bash_history.me.jsonl")"
+assert_eq "trimmed t:0 not re-pushed to remote" $'{"t":0,"d":"","e":0,"c":"kept"}\n{"t":1,"d":"/x","e":0,"c":"stale"}' \
+  "$(cat "$R7/h7/.bash_history.me.jsonl")"
+
 # sync: partial pull (rsync 23) merges what arrived, with a warning
 L6=$T/partial_home; R6=$T/partial_remote
 mkdir -p "$L6" "$R6/part"

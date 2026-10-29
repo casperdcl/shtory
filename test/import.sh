@@ -17,12 +17,20 @@ assert_eq "imported searchable" "git status" \
 F_before=$(cat "$F")
 HOME=$I SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null
 assert_eq "install --import: idempotent (no dup on re-run)" "$F_before" "$(cat "$F")"
-# dedup keys on (c, t:0): a normally-logged command (t>0) is still imported as a t:0 line
+# dedup against existing commands of any t: a normally-logged (t>0) command
+# blocks its import, and the existing t>0 line is untouched
 printf '%s\n' '{"t":999,"d":"/a","e":0,"c":"ls"}' > "$F"
 printf 'ls\n' > "$I/.bash_history"
 HOME=$I SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null
-assert_eq "dedup is (c,t:0): real (t>0) entry does not block import" \
-  $'{"t":0,"d":"","e":0,"c":"ls"}\n{"t":999,"d":"/a","e":0,"c":"ls"}' \
+assert_eq "dedup: existing (t>0) entry blocks import, kept untouched" \
+  $'{"t":999,"d":"/a","e":0,"c":"ls"}' \
+  "$(cat "$F")"
+# stale import: a t:0 line whose command is now logged (t>0) is removed
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"ls"}' '{"t":42,"d":"/b","e":0,"c":"ls"}' > "$F"
+printf 'other\n' > "$I/.bash_history"
+HOME=$I SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null
+assert_eq "stale t:0 removed when a t>0 entry exists" \
+  $'{"t":0,"d":"","e":0,"c":"other"}\n{"t":42,"d":"/b","e":0,"c":"ls"}' \
   "$(cat "$F")"
 printf '%s\n' '{"t":500,"d":"/a","e":0,"c":"existing"}' > "$F"
 printf 'echo new\n' > "$I/.bash_history"

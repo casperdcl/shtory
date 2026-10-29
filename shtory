@@ -194,32 +194,52 @@ strip_line() {
   rm -f "$tmp"
 }
 
+# drop t:0 (imported) commands which exist (t:!=0)
+drop_stale() {
+  jq -c -s '(map(select(.t != 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $live
+    | map(if .t == 0 and $live[.c] then empty else . end) | .[]'
+}
+
 # import from `sort -u ~/.bash_history | grep -v "^#"` with {t:0, d:"", e:0}
 # (used by install --import)
 import_history() {
-  local src="$HOME/.bash_history" f tmp n
+  local src="$HOME/.bash_history" f tmp tmp2='' n
   f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
-  # drop comments, dedupe already-imported t:0 commands
+  # drop comments, dedupe against commands
   if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
     | { LC_ALL=C grep -a -v '^#' || true; } \
     | jq -Rcn --slurpfile ex <( [[ -f $f ]] && cat "$f" ) \
-        '($ex | map(select(.t == 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $exset
+        '($ex | map(.c) | reduce .[] as $x ({}; .[$x] = true)) as $exset
          | [inputs | select(length > 0)]
          | reduce .[] as $c ({}; if ($exset[$c]) or (.[ $c ]) then . else .[$c] = true end)
          | keys_unsorted | .[] | {t:0,d:"",e:0,c:.}' > "$tmp"; then
     n=$(wc -l < "$tmp")
+    # stale imports: drop t:0 commands which now exist as t:!=0
+    if [[ -f $f ]]; then
+      tmp2=$(mktemp)
+      if ! drop_stale < "$f" > "$tmp2"; then
+        rm -f "$tmp" "$tmp2"
+        echo "shtory: import failed" >&2
+        return 1
+      fi
+    fi
+    local out; out=$(mktemp "$f.XXXXXX")   # 0600, same dir so mv is atomic; redirect truncates (mode-preserving)
+    if [[ -f $f ]]; then cat "$tmp" "$tmp2" > "$out"; else cat "$tmp" > "$out"; fi
+    if cmp -s "$out" "$f"; then
+      rm -f "$out" "$tmp" "$tmp2"
+      echo "shtory: nothing to import"
+      return 0
+    fi
+    mv "$out" "$f"
     if (( n > 0 )); then
-      local out; out=$(mktemp "$f.XXXXXX")   # 0600, same dir so mv is atomic; redirect truncates (mode-preserving)
-      if [[ -f $f ]]; then cat "$tmp" "$f" > "$out"; else cat "$tmp" > "$out"; fi
-      mv "$out" "$f"
       echo "shtory: imported $n commands into $f"
     else
-      echo "shtory: nothing to import"
+      echo "shtory: deduped stale imports from $f"
     fi
-    rm -f "$tmp"
+    rm -f "$tmp" "$tmp2"
   else
     rm -f "$tmp"
     echo "shtory: import failed" >&2
@@ -491,6 +511,7 @@ sync_merge() {
     tmp=$(mktemp "$HOME/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
       | jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]' \
+      | drop_stale \
       > "$tmp"; then
       mv "$tmp" "$HOME/$base"
     else
