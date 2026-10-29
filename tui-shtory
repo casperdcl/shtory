@@ -64,9 +64,27 @@ main() {
   local key line filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0
   local -a shown=()
   local filter_prev=$'\x01' # sentinel: force the first computation
-  # streamed stdin: rows may still be arriving while the TUI is up;
-  # drain between frames, buffering partial lines
-  local pending_stdin='' stdin_open=1 dirty=1 filtered_upto=0
+  # streamed stdin: rows may still be arriving while the TUI is up. A
+  # background feeder reads them (buffered, C-speed) and sends
+  # sentinel-delimited batches over a FIFO, one unacked batch at a time (a
+  # batch must fit the pipe buffer while the main loop is busy); the main
+  # loop polls the tty with a short timeout and drains pending batches each
+  # pass. No signals: bash's read-with-trapped-USR1 restarts/delays
+  # nondeterministically, and a blocking `read` on the stream itself drains
+  # byte-by-byte and stalls key input for seconds. (Background jobs in a
+  # non-interactive shell get stdin from /dev/null, so the stream is kept
+  # on fd 6 for the feeder.)
+  local tmpd fifo ackf mark eof sentinel
+  tmpd=$(mktemp -d) || exit 1
+  fifo="$tmpd/batch"; ackf="$tmpd/ack"; mark="$tmpd/mark"; eof="$tmpd/eof"
+  if ! mkfifo "$fifo" || ! mkfifo "$ackf"; then
+    rm -rf "$tmpd"
+    exit 1
+  fi
+  : > "$mark"
+  sentinel="shtory-batch-$$_$RANDOM"
+  exec 3<> "$fifo" 4> "$fifo" 5<> "$ackf" 6<&0
+  local stdin_open=1 dirty=1 filtered_upto=0 feeder_pid=''
   saved=$(stty -g < /dev/tty 2>/dev/null) || saved=''
   # shellcheck disable=SC2329,SC2317 # invoked via trap
   restore_tty() {
@@ -76,6 +94,10 @@ main() {
     else
       stty -raw echo < /dev/tty 2>/dev/null
     fi
+    if [[ -n $feeder_pid ]]; then
+      kill "$feeder_pid" 2>/dev/null
+    fi
+    rm -rf "$tmpd"
   }
   trap restore_tty EXIT
   trap 'exit 130' INT
@@ -88,31 +110,39 @@ main() {
   printf '\e[?1049h' > /dev/tty
   alt=1
 
-  # append complete stdin lines to items; return 1 on EOF. read -t
-  # times out (>128) with the partial content it got: hold it in
-  # pending_stdin until the line completes.
-  drain_stdin() {
-    local rc2=0 chunk='' n=0
-    while :; do
-      IFS= read -r -t 0.01 chunk || rc2=$?
-      if (( rc2 == 0 )); then
-        items+=("$pending_stdin$chunk"); pending_stdin=''; dirty=1
-        # at most 200 lines per call: reading until the pipe is empty would
-        # starve the key read while the stream is open
-        if (( ++n >= 200 )); then
-          return 0
-        fi
-      elif (( rc2 < 128 )); then
-        if [[ -n $pending_stdin ]]; then
-          items+=("$pending_stdin"); pending_stdin=''; dirty=1
-        fi
-        return 1
-      elif [[ -n $chunk ]]; then
-        pending_stdin+=$chunk
-      else
-        return 0
+  # read the stream (fd 6) and send batches; flush at 256 lines or 16KB
+  # (a batch must fit the pipe buffer while the main loop is between
+  # batches), then block on the main loop's ack before sending the next
+  feeder() {
+    local l batch='' n=0 final=0
+    send() {
+      printf '%s%s\n' "$batch" "$sentinel" >&4
+      batch=''; n=0
+      printf x >> "$mark"
+      (( final )) && touch "$eof"
+      read -rs -N 1 -u 5 # block on the main loop's ack (byte -> REPLY)
+    }
+    while IFS= read -r -u 6 l || [[ -n $l ]]; do
+      batch+="$l"$'\n'; n=$(( n + 1 ))
+      if (( n >= 256 || ${#batch} >= 16384 )); then
+        send
       fi
     done
+    final=1 # terminal batch (empty if the stream ran dry) = stream over
+    send
+  }
+
+  # one batch is guaranteed to be in the FIFO (ack handshake); drop items
+  # up to the sentinel
+  drain_batch() {
+    local l
+    while IFS= read -r -u 3 l; do
+      if [[ $l == "$sentinel" ]]; then
+        return 0
+      fi
+      items+=("$l"); dirty=1
+    done
+    return 1
   }
 
   # update shown from items. With an active filter, filter only the new
@@ -210,9 +240,19 @@ main() {
   }
 
   local changed=1
+  feeder &
+  feeder_pid=$!
   while :; do
     if (( stdin_open )); then
-      if ! drain_stdin; then
+      # drain every batch the feeder has sent (mark: one byte per batch)
+      while [[ -s $mark ]]; do
+        if ! drain_batch; then
+          break
+        fi
+        : > "$mark"
+        printf a >&5
+      done
+      if [[ -e $eof ]]; then
         stdin_open=0
         if (( ${#items[@]} == 0 )); then
           exit 1
@@ -229,13 +269,9 @@ main() {
       render
       changed=0
     fi
+    # poll the tty (never the stream: that was the input starvation)
     rc=0
-    if (( stdin_open )); then
-      # poll briefly so rows keep arriving while the stream is open
-      read -rs -N 1 -t 0.02 key < /dev/tty || rc=$?
-    else
-      read -rs -N 1 key < /dev/tty || rc=$?
-    fi
+    read -rs -N 1 -t 0.05 key < /dev/tty || rc=$?
     if (( rc > 128 )); then
       continue
     fi
