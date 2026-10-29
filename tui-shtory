@@ -79,7 +79,7 @@ main() {
   padstr=$(printf '%*s' "$w" '')
   dashstr=$(printf '\u2500%.0s' $(seq 1 $(( w + 4 ))))
 
-  local key filter='' sel=0 hx=0 rc=1 saved='' alt=0 maxl=0 nlist=0 nloaded=0
+  local key filter='' sel=0 hx=0 rc=1 maxl=0 nlist=0 nloaded=0
   local batch='' pending='' quit=0 i c
   local filter_prev=$'\x01' # sentinel: force the first computation
   # streamed stdin: rows may still be arriving while the TUI is up. A
@@ -91,14 +91,17 @@ main() {
   # The list is a file, not a bash array: a 100k-element array per keystroke
   # was the O(rows) search cost. A filter is a grep of the file (C-speed);
   # only the visible h-row window is materialised per frame (sed).
-  local tmpd itemsfile matchesfile activefile countfile eof
+  local itemsfile matchesfile activefile countfile eof
   tmpd=$(mktemp -d) || exit 1
   itemsfile="$tmpd/items"; matchesfile="$tmpd/matches"; countfile="$tmpd/count"; eof="$tmpd/eof"
   : > "$itemsfile"; printf 0 > "$countfile"
   activefile=$itemsfile
   exec 6<&0
-  local stdin_open=1 dirty=1 feeder_pid='' changed=1 last_count=0 cur=0
+  local stdin_open=1 dirty=1 changed=1 last_count=0 cur=0
   saved=$(stty -g < /dev/tty 2>/dev/null) || saved=''
+  # restore_tty's state is global (not local): a fatal expansion error
+  # mid-function discards main's frame, and the EXIT trap must still clean up
+  alt=0 feeder_pid=''
   # shellcheck disable=SC2329,SC2317 # invoked via trap
   restore_tty() {
     if (( alt )); then
@@ -110,10 +113,10 @@ main() {
     else
       stty -raw echo < /dev/tty 2>/dev/null
     fi
-    if [[ -n $feeder_pid ]]; then
-      kill "$feeder_pid" 2>/dev/null
+    if [[ -n ${feeder_pid-} ]]; then
+      kill "${feeder_pid}" 2>/dev/null
     fi
-    rm -rf "$tmpd"
+    rm -rf "${tmpd-}"
   }
   trap restore_tty EXIT
   trap 'exit 130' INT
@@ -250,7 +253,11 @@ main() {
         fz=${fz//$'\t'/  }
         rest=${rest//$'\t'/  }
         rw=$(( w - ${#fz} ))
-        if (( ${#rest} <= rw )); then
+        if (( rw < 0 )); then
+          # frozen part alone is wider than the window: clip it, drop the dim rest
+          fz=${fz:0:w}
+          rest=''
+        elif (( ${#rest} <= rw )); then
           rest="${padstr:0:$(( rw - ${#rest} ))}$rest"
         else
           rest=${rest:0:rw}

@@ -51,6 +51,15 @@ EOF
     "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows2" /dev/null 2>/dev/null | tr -d '\r')
   [[ $out == *$'\e[7m beta'* ]] && ok "pty: tui-shtory arrow re-renders" || bad "pty: tui-shtory arrow re-renders"
 
+  # tui-shtory --freeze-left: a frozen field wider than the window must clip,
+  # not die (a fatal substring error once left the tty raw, alt screen on)
+  printf 'averyveryveryverylongcommandword\tx\n' > "$T/tui_rows3"
+  out=$( { sleep 0.7; printf 'x'; sleep 0.5; printf '\x1b'; sleep 0.5; } | \
+    SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
+    "$SC" -qec "stty rows 8 cols 24 2>/dev/null; $TUI --freeze-left=1 < $T/tui_rows3" /dev/null 2>/dev/null | tr -d '\r')
+  [[ $out != *substring* && $out != *unbound* && $out == *"averyveryveryverylongc"* ]] \
+    && ok "pty: tui-shtory freeze overflow clips" || bad "pty: tui-shtory freeze overflow clips ($(lastline "$out"))"
+
   # HISTCONTROL: the hook mirrors bash's history list, so ignoredups/ignorespace/
   # ignoreboth/erasedups are respected; input lines are spaced out (all-at-once
   # pty input is read ahead before the first prompt)
