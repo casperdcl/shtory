@@ -5,6 +5,14 @@ source ./test/common.sh
 echo "# stats / compact"
 assert_eq "stats hostA" '{"host":"hostA","commands":5,"first":"1970-01-01T00:16:40Z","last":"1970-01-01T00:23:20Z","failed":1}' \
   "$(HOME=$S "$B" stats | grep hostA)"
+# t:0 (imported, untimestamped) entries don't count as the first command
+T0=$T/t0_home; mkdir -p "$T0"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"imported"}' '{"t":500,"d":"/a","e":0,"c":"live1"}' '{"t":300,"d":"/a","e":0,"c":"live2"}' > "$T0/.bash_history.hostZ.jsonl"
+assert_eq "stats skips t:0 for first" '{"host":"hostZ","commands":3,"first":"1970-01-01T00:05:00Z","last":"1970-01-01T00:08:20Z","failed":0}' \
+  "$(HOME=$T0 "$B" stats | grep hostZ)"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"imported"}' > "$T0/.bash_history.hostY.jsonl"
+assert_eq "stats all-t:0: first null" '{"host":"hostY","commands":1,"first":null,"last":"1970-01-01T00:00:00Z","failed":0}' \
+  "$(HOME=$T0 "$B" stats | grep hostY)"
 printf '%s\n' \
   '{"t":1,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":2,"d":"/uniquedir1","e":0,"c":"zzztop"}' \
   '{"t":3,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":4,"d":"/uniquedir1","e":0,"c":"qqq"}' \

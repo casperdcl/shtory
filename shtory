@@ -664,7 +664,7 @@ cmd_stats() {
       host=$(host_of "$f")
       jq -Rc --arg h "$host" '[. , inputs | fromjson? | select(. != null)]
         | {host: $h, commands: length,
-           first: (if length then (map(.t) | min | todate) else null end),
+           first: (if length then ([.[] | select(.t > 0) | .t] | if length > 0 then (min | todate) else null end) else null end),
            last: (if length then (map(.t) | max | todate) else null end),
            failed: ([.[] | select(.e != 0)] | length)}' "$f" || continue
     done
