@@ -66,10 +66,8 @@ hook_block() {
 
 # >>> shtory >>>
 __shtory_log() {
-  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re f
+  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re f n
   f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
-  # creation mode 0600
-  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
@@ -77,8 +75,16 @@ __shtory_log() {
   # prompt appearing while user typing (input latency):
   # history 1 shows unexecuted line with stale status;
   # skip it (logged at the next prompt).
-  # Also skip re-logged entries (bare Enter, `history -r` re-reads resurfacing an old entry).
   (( ${BASH_REMATCH[1]} > HISTCMD )) && return 0
+  # grows only on new commands, respecting HISTCONTROL;
+  # last entry's index is the list length;
+  # non-empty HISTFILE at first prompt means list came from re-read (not from user)
+  n=${BASH_REMATCH[1]}
+  if [[ -z ${__shtory_last_listlen-} ]]; then
+    [[ -s ${HISTFILE:-$HOME/.bash_history} ]] && __shtory_last_listlen=$n || __shtory_last_listlen=$((n - 1))
+  fi
+  (( n <= __shtory_last_listlen )) && return 0
+  __shtory_last_listlen=$n
   cmd=${BASH_REMATCH[2]}
   [[ ${BASH_REMATCH[1]}:$cmd == "${__shtory_last_logged-}" ]] && return 0
   __shtory_last_logged="${BASH_REMATCH[1]}:$cmd"
@@ -93,6 +99,8 @@ __shtory_log() {
   esc=${esc//[[:cntrl:]]/}
   d=${PWD//\\/\\\\}
   d=${d//\"/\\\"}
+  # creation mode 0600
+  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
   printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
@@ -267,7 +275,7 @@ def tilde: if $home == "" then .
   | fromjson? | select(. != null)
   # host from the filename .bash_history.<host>.jsonl;
   # avoid (possibly jq version unsupported) named captures in sub templates
-  | .H = (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; ""))
+  | .H = (if $H == "" then (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; "")) else $H end)
   | select(
     # ascii_downcase both sides: test(...;"i") miscompiles in some jq versions
     (if $q == "" then true else ((.c | ascii_downcase) | test($q | ascii_downcase)) end)
@@ -278,8 +286,8 @@ def tilde: if $home == "" then .
   ) ]
 | ( if $o == "newest" then sort_by(-.t) | group_by(.c) | map(.[0]) | sort_by(-.t)
     elif $o == "oldest" then sort_by(.t) | group_by(.c) | map(last) | sort_by(.t)
-    else group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
-  end )
+    elif $o == "count" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
+    else . end )
 | (if $n == 0 then . else .[0:$n] end)
 | .[]
 | (if $mode == "rows"
@@ -295,7 +303,24 @@ query() {
   jq -Rr \
     --arg q "$q" --arg d "$cwd" --arg e "$efilter" \
     --arg o "$order" --argjson n "$limit" --arg mode "$mode" \
-    --arg home "$HOME" "$JQ_PROG" "${files[@]}" | prog "$msg"
+    --arg home "$HOME" --arg H "" "$JQ_PROG" "${files[@]}" | prog "$msg"
+}
+
+# streaming newest-first rows of t-ordered files
+fzf_rows() {
+  local f line t
+  while IFS=$'\t' read -r t f; do
+    tac "$f" | jq -Rr \
+      --arg q '' --arg d "$cwd" --arg e "$efilter" \
+      --arg o none --argjson n "$limit" --arg mode rows \
+      --arg home "$HOME" --arg H "$(host_of "$f")" "$JQ_PROG"
+  done < <(
+    for f in "${files[@]}"; do
+      line=$(tail -n 1 "$f" 2>/dev/null)
+      if [[ $line =~ \"t\":([0-9]+) ]]; then t=${BASH_REMATCH[1]}; else t=0; fi
+      printf '%s\t%s\n' "$t" "$f"
+    done | sort -rn
+  )
 }
 
 search_loop() {
@@ -374,7 +399,7 @@ cmd_search() {
     fi
   fi
   if [[ -z $limit ]]; then
-    if [[ $interactive -eq 1 && $picker != fzf ]]; then
+    if [[ $picker == tui-shtory ]]; then
       limit=9999
     else
       limit=0
@@ -382,9 +407,17 @@ cmd_search() {
   fi
   if [[ $interactive -eq 1 ]]; then
     if [[ -n $picker ]] && command -v "$picker" >/dev/null 2>&1; then
-      # shellcheck disable=SC2086 # word splitting intended
-      if ! sel_row=$(query '' rows | "$picker" $fzf_opts); then
-        return 1
+      # pipefail off to allow selecting before stream ends
+      if (( limit > 0 )); then
+        # shellcheck disable=SC2086 # word splitting of $fzf_opts intended
+        if ! sel_row=$(set +o pipefail; fzf_rows | head -n "$limit" | "$picker" $fzf_opts); then
+          return 1
+        fi
+      else
+        # shellcheck disable=SC2086 # word splitting intended
+        if ! sel_row=$(set +o pipefail; fzf_rows | "$picker" $fzf_opts); then
+          return 1
+        fi
       fi
       printf '%s\n' "${sel_row%%$'\t'*}"
       return 0

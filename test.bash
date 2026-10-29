@@ -75,6 +75,15 @@ assert_eq "exit code captured" "1" "$(jq -r 'select(.c == "false") | .e' "$F")"
 assert_eq "pipeline captured whole" "echo a | grep a" "$(jq -r 'select(.c == "echo a | grep a") | .c' "$F")"
 assert_eq "cwd captured" "/tmp" "$(jq -r 'select(.c == "echo hi") | .d' "$F")"
 assert_eq "quoting/backslash escaped" 'printf '\''q"uote and \back\slash'\''' "$(jq -r 'select(.c | contains("q\"uote")) | .c' "$F")"
+# a new session must not re-log the last command of the re-read history file
+H2=$T/hook_home2; mkdir -p "$H2"
+SHTORY_BASHRC=$H2/.bashrc "$B" install >/dev/null
+printf 'old cmd one\nold cmd two\n' > "$H2/.bash_history"
+printf 'fresh cmd\n' > "$T/hook2.sh"
+( HOME=$H2 SHTORY_HOSTNAME=testhost2 TERM=dumb bash -i < "$T/hook2.sh" >/dev/null 2>&1 )
+F2=$H2/.bash_history.testhost2.jsonl
+[[ -f $F2 && $(wc -l < "$F2") == 1 ]] && ok "re-read entry not re-logged" || bad "re-read entry not re-logged ($(jq -r .c "$F2" 2>/dev/null | tr '\n' '|'))"
+assert_eq "re-read entry: fresh cmd logged" "fresh cmd" "$(jq -r .c "$F2" 2>/dev/null)"
 
 echo "# tui filter"
 shtory_fn() { bash -c "source \"$B\" >/dev/null 2>&1; $*"; }
@@ -134,6 +143,13 @@ rows(){ HOME=$S shtory_fn "cwd= efilter= order=newest limit=1000 files=(\"$S/.ba
 assert_eq "path: home itself is ~" $'in-home\t~\t0\t1970-01-01 00:00\thostT' "$(rows in-home)"
 assert_eq "path: home prefix is ~/" $'in-sub\t~/sub\t0\t1970-01-01 00:00\thostT' "$(rows in-sub)"
 assert_eq "path: sibling prefix untouched" $'in-sibling\t'"$S-x"$'\t0\t1970-01-01 00:00\thostT' "$(rows in-sibling)"
+SH=$T/streamhome; mkdir -p "$SH"
+printf '{"t":2,"d":"/x","e":0,"c":"own-old"}\n{"t":4,"d":"/x","e":0,"c":"own-new"}\n' > "$SH/.bash_history.own.jsonl"
+printf '{"t":1,"d":"/x","e":0,"c":"other-old"}\n{"t":3,"d":"/x","e":0,"c":"other-new"}\n' > "$SH/.bash_history.other.jsonl"
+assert_eq "fzf stream: newest file first, newest first" $'own-new\nown-old\nother-new\nother-old' \
+  "$(HOME=$SH shtory_fn 'cwd= efilter= limit=0 files=("'$SH'/.bash_history.other.jsonl" "'$SH'/.bash_history.own.jsonl"); fzf_rows' | cut -f1)"
+assert_eq "fzf stream: single file, newest first" $'other-new\nother-old' \
+  "$(HOME=$SH shtory_fn 'cwd= efilter= limit=0 files=("'$SH'/.bash_history.other.jsonl"); fzf_rows' | cut -f1)"
 
 echo "# hostname"
 assert_eq "prints effective host" "${SHTORY_HOSTNAME:-$HOSTNAME}" "$(HOME=$S "$B" hostname)"
@@ -471,6 +487,25 @@ else
   out=$(printf 'a\n' | SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
     "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows" /dev/null 2>/dev/null | tr -d '\r')
   [[ $(lastline "$out") == *"alpha cmd"* ]] && ok "pty: tui-shtory filters & selects" || bad "pty: tui-shtory filters & selects ($(lastline "$out"))"
+
+  # HISTCONTROL: the hook mirrors bash's history list, so ignoredups/ignorespace/
+  # ignoreboth/erasedups are respected; input lines are spaced out (all-at-once
+  # pty input is read ahead before the first prompt)
+  HC=$T/hc_home; mkdir -p "$HC"
+  SHTORY_BASHRC=$HC/.bashrc HOME=$HC "$B" install >/dev/null
+  hc_run() { # $1 = HISTCONTROL value, rest = commands; prints saved commands
+    local hc=$1 line; shift
+    rm -f "$HC/.bash_history" "$HC"/.bash_history.*.jsonl
+    printf 'export HISTCONTROL=%s\n' "$hc" >> "$HC/.bashrc"
+    { for line in "$@"; do sleep 0.25; printf '%s\n' "$line"; done
+      sleep 0.25; printf 'exit\n'; sleep 0.5; } \
+      | SHELL=$NP/bash PATH=$NP HOME=$HC "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
+    jq -r .c "$HC"/.bash_history.*.jsonl 2>/dev/null
+  }
+  assert_eq "HISTCONTROL unset saves all" $'echo a\necho a\necho b' "$(hc_run '' 'echo a' 'echo a' 'echo b')"
+  assert_eq "HISTCONTROL=ignoredups" $'echo a\necho b' "$(hc_run ignoredups 'echo a' 'echo a' 'echo b')"
+  assert_eq "HISTCONTROL=ignorespace" $'echo a\necho c' "$(hc_run ignorespace 'echo a' ' echo b' 'echo c')"
+  assert_eq "HISTCONTROL=ignoreboth" $'echo a\necho c' "$(hc_run ignoreboth 'echo a' ' echo b' 'echo a' 'echo c')"
 fi
 
 echo "# result"
