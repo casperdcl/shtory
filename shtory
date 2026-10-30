@@ -213,6 +213,7 @@ import_history() {
   # drop comments, dedupe against commands
   if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
     | { LC_ALL=C grep -a -v '^#' || true; } \
+    | prog import \
     | jq -Rcn --slurpfile ex <( [[ -f $f ]] && cat "$f" ) \
         '($ex | map(.c) | reduce .[] as $x ({}; .[$x] = true)) as $exset
          | [inputs | select(length > 0)]
@@ -294,29 +295,35 @@ TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startsw
 JQ_PROG='
 # host from the filename .bash_history.<host>.jsonl;
 # avoid (possibly jq version unsupported) named captures in sub templates
-def entries:
-  . , inputs
-  | fromjson? | select(. != null)
-  | .H = (if $H == "" then (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; "")) else $H end)
-  | select(
-    # ascii_downcase both sides: test(...;"i") miscompiles in some jq versions
-    (if $q == "" then true else ((.c | ascii_downcase) | test($q | ascii_downcase)) end)
-    and (if $d == "" then true else (.d == $d) end)
-    and (if $e == "zero" then .e == 0
-         elif $e == "nonzero" then .e != 0
-         else true end)
-  );
-def row:
-  .c + "\t" + (.d | tilde) + "\t" + (.e | tostring)
+# $plain=1: query is a plain substring (no regex metachars) -> contains (C-speed memmem, ~4x quicker)
+($q | ascii_downcase) as $ql
+| def entries:
+    . , inputs
+    | fromjson? | select(. != null)
+    | .H = (if $mode == "cmd" then ""
+            elif $H == "" then (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; ""))
+            else $H end)
+    | select(
+      # ascii_downcase: test(...;"i") miscompiles in some jq versions
+      (if $q == "" then true
+       elif $plain == "1" then ((.c | ascii_downcase) | contains($ql))
+       else ((.c | ascii_downcase) | test($ql)) end)
+      and (if $d == "" then true else (.d == $d) end)
+      and (if $e == "zero" then .e == 0
+           elif $e == "nonzero" then .e != 0
+           else true end)
+    );
+   def row:
+    .c + "\t" + (.d | tilde) + "\t" + (.e | tostring)
     + "\t" + ((.t | todate | sub("T"; " ") | .[0:16])) + "\t" + .H;
-# rows+none stream line-by-line (the picker; fzf_rows pre-sorts with tac);
-# anything else slurps, sorts, caps
+   # rows+none stream line-by-line (the picker; fzf_rows pre-sorts with tac);
+   # anything else slurps, sorts, caps
 if $mode == "rows" and $o == "none" then
   (if $n == 0 then entries else limit($n; entries) end) | row
 else
   [ entries ]
-  | ( if $o == "newest" then sort_by(-.t) | group_by(.c) | map(.[0]) | sort_by(-.t)
-      elif $o == "oldest" then sort_by(.t) | group_by(.c) | map(last) | sort_by(.t)
+  | ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
+      elif $o == "oldest" then group_by(.c) | map(min_by(.t)) | sort_by(.t)
       elif $o == "count" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
       else . end )
   | (if $n == 0 then . else .[0:$n] end)
@@ -332,9 +339,11 @@ jq_reset_args() { jqargs=(--arg d "$cwd" --arg e "$efilter" --argjson n "$limit"
 query() {
   local q=$1 mode=$2 msg='search'
   command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
+  local plain=1 # plain substring (no regex metachars)
+  [[ -n ${q//[a-zA-Z0-9_ -]/} ]] && plain=0
   jq_reset_args
   jq -Rr \
-    --arg q "$q" --arg o "$order" --arg mode "$mode" \
+    --arg q "$q" --arg o "$order" --arg mode "$mode" --arg plain "$plain" \
     "${jqargs[@]}" --arg H "" "${TILDE_JQ}${JQ_PROG}" "${files[@]}" | prog "$msg"
 }
 
@@ -344,7 +353,7 @@ fzf_rows() {
   jq_reset_args
   while IFS=$'\t' read -r t f; do
     tac "$f" | jq -Rr \
-      --arg q '' --arg o none --arg mode rows \
+      --arg q '' --arg o none --arg mode rows --arg plain 1 \
       "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}"
   done < <(
     for f in "${files[@]}"; do
@@ -606,6 +615,7 @@ cmd_sync() {
       continue
     fi
     # name reported by host itself; may differ from ssh alias.
+    printf 'shtory: %s: syncing\n' "$h" >&2
     rc=0
     name=$(ssh -o ConnectTimeout=10 "$h" \
       "bash -c 'printf %s \${SHTORY_HOSTNAME:-\$HOSTNAME}'" 2>/dev/null) || rc=$?
@@ -640,16 +650,22 @@ cmd_sync() {
 
 # per-host activity histogram
 stats_timeline() {
-  local W=40 namew=0 f h fl first last n gstart='' gend='' span s e axis size cols
+  local W=40 namew=0 f h fl first last n gstart='' gend='' span s e axis size cols i=0
   local -a rows=()
+  # per-file jq extract t>0 values; awk binning
+  local tmpd; tmpd=$(mktemp -d)
+  trap 'rm -rf "${tmpd-}"' RETURN
   for f in "$@"; do
     h=$(host_of "$f")
-    fl=$(jq -Rrc '[. , inputs | fromjson? | select(. != null)]
-      | [.[] | select(.t > 0) | .t]
-      | if length > 0 then ((min | tostring) + " " + (max | tostring) + " " + (length | tostring)) else empty end' "$f")
+    local tfile="$tmpd/$i"
+    if ! jq -Rr 'fromjson? | select(. != null) | select(.t > 0) | .t' "$f" > "$tfile"; then
+      rm -f "$tfile"; continue
+    fi
+    i=$(( i + 1 ))
+    fl=$(awk 'NR==1{mn=mx=$1} {if($1<mn)mn=$1; if($1>mx)mx=$1} END{if(NR)print mn, mx, NR}' "$tfile")
     [[ -n $fl ]] || continue
     first=${fl%% *}; rest=${fl#* }; last=${rest%% *}; n=${rest##* }
-    rows+=("$f $h $first $last $n")
+    rows+=("$tfile $h $first $last $n")
     (( ${#h} > namew )) && namew=${#h}
     if [[ -z $gstart || $first -lt $gstart ]]; then gstart=$first; fi
     if [[ -z $gend || $last -gt $gend ]]; then gend=$last; fi
@@ -693,13 +709,12 @@ stats_timeline() {
     f=${r%% *}; rest=${r#* }
     h=${rest%% *}; rest=${rest#* }
     first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
-    # per-bucket command counts over the W-cell axis (one pass in awk)
-    mapfile -t cnt < <(jq -Rr '[. , inputs | fromjson? | select(. != null)] | .[] | select(.t > 0) | .t' "$f" \
-      | awk -v gs="$gstart" -v sp="$span" -v w="$W" '
+    # per-bin counts over W-cell axis
+    mapfile -t cnt < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
           { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
             if (b >= w) b = w - 1
             c[b]++ }
-          END { for (i = 0; i < w; i++) print c[i] + 0 }')
+          END { for (i = 0; i < w; i++) print c[i] + 0 }' "$f")
     max=0
     for c in "${cnt[@]}"; do (( c > max )) && max=$c; done
     out=''
