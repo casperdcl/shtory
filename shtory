@@ -182,8 +182,8 @@ remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
   local rc=$1 tmp
   tmp=$(mktemp)
   awk -v s="$MARK_START" -v e="$MARK_END" '$0==s{skip=1} $0==e{skip=0; next} !skip' "$rc" > "$tmp"
-  cat "$tmp" > "$rc"
-  rm -f "$tmp"
+  chmod --reference="$rc" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$rc"
 }
 
 # rewrite $1 in place (preserving permissions), dropping lines matching $2
@@ -191,8 +191,8 @@ strip_line() {
   local rc=$1 pat=$2 tmp
   tmp=$(mktemp)
   grep -vF "$pat" "$rc" > "$tmp" || true
-  cat "$tmp" > "$rc"
-  rm -f "$tmp"
+  chmod --reference="$rc" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$rc"
 }
 
 # drop t:0 (imported) commands which exist (t:!=0)
@@ -208,6 +208,7 @@ import_history() {
   f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
+  trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' RETURN
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
   # drop comments, dedupe against commands
   if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
@@ -286,12 +287,11 @@ cmd_uninstall() {
 
 host_of() { local f=$1; f=${f##*/.bash_history.}; printf '%s' "${f%.jsonl}"; }
 
+# shellcheck disable=SC2016 # $home for jq
+TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startswith($home + "/") then "~" + .[($home | length):] else . end;'
+
 # shellcheck disable=SC2016 # $vars for jq
 JQ_PROG='
-def tilde: if $home == "" then .
-  elif . == $home then "~"
-  elif startswith($home + "/") then "~" + .[($home | length):]
-  else . end;
 # host from the filename .bash_history.<host>.jsonl;
 # avoid (possibly jq version unsupported) named captures in sub templates
 def entries:
@@ -326,23 +326,26 @@ end
 '
 
 # args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
+# shared jq args for query/fzf_rows; uses $cwd $efilter $limit
+jq_reset_args() { jqargs=(--arg d "$cwd" --arg e "$efilter" --argjson n "$limit" --arg home "$HOME"); }
+
 query() {
   local q=$1 mode=$2 msg='search'
   command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
+  jq_reset_args
   jq -Rr \
-    --arg q "$q" --arg d "$cwd" --arg e "$efilter" \
-    --arg o "$order" --argjson n "$limit" --arg mode "$mode" \
-    --arg home "$HOME" --arg H "" "$JQ_PROG" "${files[@]}" | prog "$msg"
+    --arg q "$q" --arg o "$order" --arg mode "$mode" \
+    "${jqargs[@]}" --arg H "" "${TILDE_JQ}${JQ_PROG}" "${files[@]}" | prog "$msg"
 }
 
 # streaming newest-first rows of t-ordered files
 fzf_rows() {
   local f line t
+  jq_reset_args
   while IFS=$'\t' read -r t f; do
     tac "$f" | jq -Rr \
-      --arg q '' --arg d "$cwd" --arg e "$efilter" \
-      --arg o none --argjson n "$limit" --arg mode rows \
-      --arg home "$HOME" --arg H "$(host_of "$f")" "$JQ_PROG"
+      --arg q '' --arg o none --arg mode rows \
+      "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}"
   done < <(
     for f in "${files[@]}"; do
       line=$(tail -n 1 "$f" 2>/dev/null)
@@ -497,7 +500,7 @@ sync_pull() {
     cp -p -- "$f" "$dest/"
   done
   shopt -u nullglob
-  rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" 2>/dev/null || rc=$?
+  rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" || rc=$?
   if (( rc == 0 )); then
     return 0
   fi
@@ -525,8 +528,10 @@ sync_merge() {
     [[ -f "$HOME/$base" ]] && parts=("$HOME/$base" "${parts[@]}")
     tmp=$(mktemp "$HOME/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
-      | jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]' \
-      | drop_stale \
+      | jq -Rc '([. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t)) as $a
+        # drop stale t:0 (imported) entries existing with t:!=0
+        | (($a | map(select(.t != 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $live
+           | $a | map(if .t == 0 and $live[.c] then empty else . end) | .[])' \
       > "$tmp"; then
       if cmp -s -- "$HOME/$base" "$tmp"; then
         rm -f -- "$tmp" # unchanged: keep in-place mtime so the next push is a no-op
@@ -772,12 +777,8 @@ cmd_stats() {
   fi
   if [[ -n $dir ]]; then
     # shellcheck disable=SC2016 # $n for jq
-    jq -Rrc --argjson n "$dir" --arg home "$HOME" '
-      def tilde: if $home == "" then .
-        elif . == $home then "~"
-        elif startswith($home + "/") then "~" + .[($home | length):]
-        else . end;
-      [ . , inputs | fromjson? | select(. != null) ]
+    jq -Rrc --argjson n "$dir" --arg home "$HOME" \
+      "${TILDE_JQ}"'[ . , inputs | fromjson? | select(. != null) ]
       | group_by(.d) | map({d: .[0].d, n: length}) | sort_by(-.n, .d) | .[0:$n] | .[]
       | (.n | tostring) + "\t" + (.d | tilde)' "${files[@]}"
   fi
@@ -793,6 +794,7 @@ compact_file() {
     mv "$tmp" "$f"
   else
     rm -f "$tmp"
+    echo "shtory: compact of ${f##*/} failed" >&2
   fi
 }
 

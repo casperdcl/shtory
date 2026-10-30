@@ -14,6 +14,7 @@ printf '%s\n' '{"t":0,"d":"","e":0,"c":"imported"}' > "$T0/.bash_history.hostY.j
 assert_eq "stats all-t:0: first null" '{"host":"hostY","commands":1,"first":null,"last":"1970-01-01T00:00:00Z","failed":0}' \
   "$(HOME=$T0 "$B" stats | grep hostY)"
 # stats --timeline: per-host activity histogram on a shared time axis
+# setsid: drop the controlling tty so the bar width stays 40 regardless of the dev's terminal size
 G=$T/g_home; mkdir -p "$G"
 printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"a0"}' '{"t":11,"d":"/a","e":0,"c":"a1"}' '{"t":12,"d":"/a","e":0,"c":"a2"}' '{"t":110,"d":"/a","e":0,"c":"a3"}' '{"t":114,"d":"/a","e":0,"c":"a4"}' '{"t":210,"d":"/a","e":0,"c":"a5"}' > "$G/.bash_history.aa.jsonl"
 printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"b0"}' '{"t":20,"d":"/a","e":0,"c":"b1"}' '{"t":30,"d":"/a","e":0,"c":"b2"}' '{"t":40,"d":"/a","e":0,"c":"b3"}' > "$G/.bash_history.bb.jsonl"

@@ -364,7 +364,7 @@ main() {
     # end of a buffer is held (pending) for the next read instead of
     # cancelling immediately, so a slow/ssh split still reassembles
     rc=0
-    read -rs -N 64 -t 0.005 batch < /dev/tty || rc=$?
+    read -rs -N 64 -t 0.02 batch < /dev/tty || rc=$?
     if (( rc == 1 )); then   # EOF: the tty closed
       rc=1; break
     fi
