@@ -180,7 +180,7 @@ EOF
 
 remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
   local rc=$1 tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "${rc}.XXXXXX") # same dir as $rc so mv is atomic
   awk -v s="$MARK_START" -v e="$MARK_END" '$0==s{skip=1} $0==e{skip=0; next} !skip' "$rc" > "$tmp"
   chmod --reference="$rc" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rc"
@@ -188,11 +188,11 @@ remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
 
 # rewrite $1 in place (preserving permissions), dropping lines matching $2
 strip_line() {
-  local rc=$1 pat=$2 tmp
-  tmp=$(mktemp)
-  grep -vF "$pat" "$rc" > "$tmp" || true
-  chmod --reference="$rc" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rc"
+  local rcfile=$1 pat=$2 tmp
+  tmp=$(mktemp "${rcfile}.XXXXXX")
+  grep -vF "$pat" "$rcfile" > "$tmp" || true
+  chmod --reference="$rcfile" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$rcfile"
 }
 
 # drop t:0 (imported) commands which exist (t:!=0)
@@ -204,11 +204,13 @@ drop_stale() {
 # import from `sort -u ~/.bash_history | grep -v "^#"` with {t:0, d:"", e:0}
 # (used by install --import)
 import_history() {
-  local src="$HOME/.bash_history" f tmp tmp2='' n
+  # tmp/tmp2/out: global (EXIT trap on signal exit has no locals)
+  local src="$HOME/.bash_history" f n
+  tmp='' tmp2=''
   f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
-  trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' RETURN
+  trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
   # drop comments, dedupe against commands
   if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
@@ -229,7 +231,7 @@ import_history() {
         return 1
       fi
     fi
-    local out; out=$(mktemp "$f.XXXXXX")   # 0600, same dir so mv is atomic; redirect truncates (mode-preserving)
+    out=$(mktemp "$f.XXXXXX") # 0600, same dir so mv is atomic; redirect truncates (mode-preserving)
     if [[ -f $f ]]; then cat "$tmp" "$tmp2" > "$out"; else cat "$tmp" > "$out"; fi
     if cmp -s "$out" "$f"; then
       rm -f "$out" "$tmp" "$tmp2"
@@ -603,9 +605,8 @@ cmd_sync() {
     return 1
   fi
 
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  trap 'rm -rf "${tmpdir-}"' RETURN
+  tmpdir=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
+  trap 'rm -rf "${tmpdir-}"' EXIT
 
   local -a pulled=() f
   declare -A name_of=()
@@ -653,8 +654,8 @@ stats_timeline() {
   local W=40 namew=0 f h fl first last n gstart='' gend='' span s e axis size cols i=0
   local -a rows=()
   # per-file jq extract t>0 values; awk binning
-  local tmpd; tmpd=$(mktemp -d)
-  trap 'rm -rf "${tmpd-}"' RETURN
+  tmpd=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
+  trap 'rm -rf "${tmpd-}"' EXIT
   for f in "$@"; do
     h=$(host_of "$f")
     local tfile="$tmpd/$i"
