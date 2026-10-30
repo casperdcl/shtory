@@ -13,6 +13,37 @@ assert_eq "stats skips t:0 for first" '{"host":"hostZ","commands":3,"first":"197
 printf '%s\n' '{"t":0,"d":"","e":0,"c":"imported"}' > "$T0/.bash_history.hostY.jsonl"
 assert_eq "stats all-t:0: first null" '{"host":"hostY","commands":1,"first":null,"last":"1970-01-01T00:00:00Z","failed":0}' \
   "$(HOME=$T0 "$B" stats | grep hostY)"
+# stats --timeline: per-host activity histogram on a shared time axis
+G=$T/g_home; mkdir -p "$G"
+printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"a0"}' '{"t":11,"d":"/a","e":0,"c":"a1"}' '{"t":12,"d":"/a","e":0,"c":"a2"}' '{"t":110,"d":"/a","e":0,"c":"a3"}' '{"t":114,"d":"/a","e":0,"c":"a4"}' '{"t":210,"d":"/a","e":0,"c":"a5"}' > "$G/.bash_history.aa.jsonl"
+printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"b0"}' '{"t":20,"d":"/a","e":0,"c":"b1"}' '{"t":30,"d":"/a","e":0,"c":"b2"}' '{"t":40,"d":"/a","e":0,"c":"b3"}' > "$G/.bash_history.bb.jsonl"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"imported"}' > "$G/.bash_history.hostZ0.jsonl"   # t:0-only host skipped
+assert_eq "stats --timeline" "$(cat <<'EOF'
+    1970-01-01                    1970-01-01  cmds days
+aa  █                   ▅                  ▂     6    0
+bb  █ █ █ █                                      4    0
+EOF
+)" "$(HOME=$G setsid "$B" stats --timeline)"
+G1=$T/g1_home; mkdir -p "$G1"
+printf '{"t":1000,"d":"/a","e":0,"c":"solo"}\n' > "$G1/.bash_history.solo.jsonl"
+assert_eq "stats --timeline single point" $'      1970-01-01                    1970-01-01  cmds days\nsolo  █                                            1    0' \
+  "$(HOME=$G1 setsid "$B" stats --timeline)"
+# alignment: 2-digit counts/days right-align with 1-digit ones
+GA=$T/ga_home; mkdir -p "$GA"
+printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"x0"}' '{"t":11,"d":"/a","e":0,"c":"x1"}' '{"t":12,"d":"/a","e":0,"c":"x2"}' '{"t":13,"d":"/a","e":0,"c":"x3"}' '{"t":14,"d":"/a","e":0,"c":"x4"}' '{"t":15,"d":"/a","e":0,"c":"x5"}' '{"t":16,"d":"/a","e":0,"c":"x6"}' '{"t":17,"d":"/a","e":0,"c":"x7"}' '{"t":18,"d":"/a","e":0,"c":"x8"}' '{"t":19,"d":"/a","e":0,"c":"x9"}' '{"t":1041810,"d":"/a","e":0,"c":"x10"}' '{"t":1041814,"d":"/a","e":0,"c":"x11"}' > "$GA/.bash_history.h1.jsonl"
+printf '%s\n' '{"t":5,"d":"/a","e":0,"c":"y0"}' '{"t":6,"d":"/a","e":0,"c":"y1"}' '{"t":7,"d":"/a","e":0,"c":"y2"}' > "$GA/.bash_history.h2.jsonl"
+assert_eq "stats --timeline right-aligns counts/days" "$(cat <<'EOF'
+    1970-01-01                    1970-01-13  cmds days
+h2  █                                            3    0
+h1  █                                      ▁    12   12
+EOF
+)" "$(HOME=$GA setsid "$B" stats --timeline)"
+HOME=$G "$B" stats --timeline --cmd 2 >/dev/null 2>&1; assert_rc "stats --timeline exclusive rc 2" 2 $?
+GN=$T/gn_home; mkdir -p "$GN"
+printf '{"t":0,"d":"","e":0,"c":"i"}\n' > "$GN/.bash_history.h.jsonl"
+out=$(HOME=$GN "$B" stats --timeline 2>&1); rc=$?
+assert_rc "stats --timeline t:0-only rc 1" 1 $rc
+[[ $out == *"no history with timestamps"* ]] && ok "stats --timeline t:0-only warns" || bad "stats --timeline t:0-only warns ($out)"
 printf '%s\n' \
   '{"t":1,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":2,"d":"/uniquedir1","e":0,"c":"zzztop"}' \
   '{"t":3,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":4,"d":"/uniquedir1","e":0,"c":"qqq"}' \

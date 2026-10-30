@@ -36,8 +36,9 @@ subcommands:
 	  (default: detect host(s) from ~/.bash_history.*.jsonl filenames)
       --self: also overwrite each host's own history file with the local synced copy
       --compact <n>: while syncing, run compact (implies --self)
-  stats [--cmd <n>] [--dir <n>]
+  stats [--timeline] [--cmd <n>] [--dir <n>]
           per-host summary
+      --timeline: per-host activity histogram over time
       --cmd, --dir: most frequent commands/dirs
   compact <n>
           deduplicate & cap each local history file to N lines
@@ -167,7 +168,7 @@ if [[ $- == *i* ]]; then
         fi
         ;;
       stats)
-        COMPREPLY=($(compgen -W '--cmd --dir' -- "$cur"))
+        COMPREPLY=($(compgen -W '--timeline --cmd --dir' -- "$cur"))
         ;;
     esac
   }
@@ -632,11 +633,95 @@ cmd_sync() {
   done
 }
 
+# per-host activity histogram
+stats_timeline() {
+  local W=40 namew=0 f h fl first last n gstart='' gend='' span s e axis size cols
+  local -a rows=()
+  for f in "$@"; do
+    h=$(host_of "$f")
+    fl=$(jq -Rrc '[. , inputs | fromjson? | select(. != null)]
+      | [.[] | select(.t > 0) | .t]
+      | if length > 0 then ((min | tostring) + " " + (max | tostring) + " " + (length | tostring)) else empty end' "$f")
+    [[ -n $fl ]] || continue
+    first=${fl%% *}; rest=${fl#* }; last=${rest%% *}; n=${rest##* }
+    rows+=("$f $h $first $last $n")
+    (( ${#h} > namew )) && namew=${#h}
+    if [[ -z $gstart || $first -lt $gstart ]]; then gstart=$first; fi
+    if [[ -z $gend || $last -gt $gend ]]; then gend=$last; fi
+  done
+  if (( ${#rows[@]} == 0 )); then
+    echo "shtory: stats: no history with timestamps (only t:0 imports)" >&2
+    return 1
+  fi
+  # oldest first-used host first (stable for equal first)
+  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -k3,3n)
+  span=$(( gend - gstart ))
+  s=$(date -u -d "@$gstart" +%Y-%m-%d)
+  e=$(date -u -d "@$gend" +%Y-%m-%d)
+  # row width = name(namew) + 2sp + axis(W) + 2sp + count(wN) + 1sp + days(wD);
+  # wN/wD must be known before W can be clamped to the terminal
+  local r rest
+  local -a ns=() ds=()
+  for r in "${rows[@]}"; do
+    f=${r%% *}; rest=${r#* }; rest=${rest#* } # drop f, h
+    first=${rest%% *}; rest=${rest#* }; last=${rest%% *}; n=${rest##* }
+    ns+=("$n"); ds+=("$(( (last - first) / 86400 ))")
+  done
+  local wN=4 wD=4 x
+  for x in "${ns[@]}"; do (( ${#x} > wN )) && wN=${#x}; done
+  for x in "${ds[@]}"; do (( ${#x} > wD )) && wD=${#x}; done
+  # Termux: [[ -t 1 ]] can report false on a real pty; use the proven stty-via-/dev/tty pattern
+  if size=$(stty size < /dev/tty 2>/dev/null); then
+    cols=${size#* }
+    if (( W > cols - namew - wN - wD - 5 )); then
+      W=$(( cols - namew - wN - wD - 5 ))
+    fi
+  fi
+  (( W < 20 )) && W=20 # floor: the two 10-char dates alone need W=20
+  axis="$s"
+  (( W - ${#s} - ${#e} > 0 )) && axis+=$(printf '%*s' "$(( W - ${#s} - ${#e} ))" '')
+  axis+=$e
+  local ramp='_▁▂▃▄▅▆▇█'
+  local c idx out max
+  local -a cnt=() names=() bars=()
+  for r in "${rows[@]}"; do
+    f=${r%% *}; rest=${r#* }
+    h=${rest%% *}; rest=${rest#* }
+    first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
+    # per-bucket command counts over the W-cell axis (one pass in awk)
+    mapfile -t cnt < <(jq -Rr '[. , inputs | fromjson? | select(. != null)] | .[] | select(.t > 0) | .t' "$f" \
+      | awk -v gs="$gstart" -v sp="$span" -v w="$W" '
+          { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
+            if (b >= w) b = w - 1
+            c[b]++ }
+          END { for (i = 0; i < w; i++) print c[i] + 0 }')
+    max=0
+    for c in "${cnt[@]}"; do (( c > max )) && max=$c; done
+    out=''
+    for (( i = 0; i < W; i++ )); do
+      c=${cnt[i]}
+      if (( c > 0 )); then
+        idx=$(( c * 8 / max ))
+        out+=${ramp:idx:1}
+      else
+        out+=' '
+      fi
+    done
+    names+=("$h"); bars+=("$out")
+  done
+  local i
+  printf '%*s%s  %*s %*s\n' "$(( namew + 2 ))" '' "$axis" "$wN" cmds "$wD" days
+  for i in "${!names[@]}"; do
+    printf '%-*s  %s  %*s %*s\n' "$namew" "${names[i]}" "${bars[i]}" "$wN" "${ns[i]}" "$wD" "${ds[i]}"
+  done
+}
+
 cmd_stats() {
-  local cmd='' dir='' host f
+  local cmd='' dir='' timeline='' host f
   local -a files=()
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --timeline) timeline=1; shift ;;
       --cmd) cmd=${2:?}; shift 2 ;;
       --dir) dir=${2:?}; shift 2 ;;
       *) echo "shtory: unknown stats option: $1" >&2; return 2 ;;
@@ -650,6 +735,10 @@ cmd_stats() {
     echo "shtory: bad --dir: $dir" >&2
     return 2
   fi
+  if [[ -n $timeline && ( -n $cmd || -n $dir ) ]]; then
+    echo "shtory: stats: --timeline cannot be used with --cmd/--dir" >&2
+    return 2
+  fi
   shopt -s nullglob
   for f in "$HOME"/.bash_history.*.jsonl; do
     files+=("$f")
@@ -658,6 +747,10 @@ cmd_stats() {
   if [[ ${#files[@]} -eq 0 ]]; then
     echo "shtory: no history files" >&2
     return 1
+  fi
+  if [[ -n $timeline ]]; then
+    stats_timeline "${files[@]}"
+    return $?
   fi
   if [[ -z $cmd && -z $dir ]]; then
     for f in "${files[@]}"; do
