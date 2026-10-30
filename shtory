@@ -524,6 +524,34 @@ sync_pull() {
   return 1
 }
 
+# dedupe & t-sort with coreutils
+# SHTORY_SAFE = 1: use jq instead (~50x slower but full JSON-compat)
+# $1 = tmp dir
+# $2 = 1: also drop stale t:0 (imported) entries existing with t:!=0
+merge_lines() {
+  local dir=$1 drop0=${2-0} t1 t2 live t0c drop
+  if [[ ${SHTORY_SAFE:-} == 1 ]]; then
+    if [[ $drop0 == 1 ]]; then
+      jq -Rc '([. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t)) as $a
+        | (($a | map(select(.t != 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $live
+           | $a | map(if .t == 0 and $live[.c] then empty else . end) | .[])'
+    else
+      jq -Rc '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[]'
+    fi
+    return
+  fi
+  t1=$dir/.m1; t2=$dir/.m2; live=$dir/.m3; t0c=$dir/.m4; drop=$dir/.m5
+  LC_ALL=C sort -u > "$t1"
+  { LC_ALL=C grep -a '^{"t":' "$t1" || true; } | { LC_ALL=C grep -a '"}$' || true; } > "$t2"
+  if [[ $drop0 == 1 ]] && LC_ALL=C grep -qa '^{"t":0,' "$t2"; then
+    LC_ALL=C sed -n 's/^{"t":[1-9].*,"c":\(.*\)}$/\1/p' "$t2" | LC_ALL=C sort -u > "$live"
+    LC_ALL=C sed -n 's/^{"t":0,"d":"","e":0,"c":\(.*\)}$/\1/p' "$t2" | LC_ALL=C sort > "$t0c"
+    LC_ALL=C comm -12 "$live" "$t0c" | sed 's/.*/{"t":0,"d":"","e":0,"c":&}/' > "$drop"
+    LC_ALL=C comm -23 "$t2" "$drop" > "$t2.m" && mv "$t2.m" "$t2"
+  fi
+  LC_ALL=C sort -t: -k2,2n "$t2"
+}
+
 # union every pulled copy of each file with the local one; $1 = pull root
 sync_merge() {
   local root=$1 f base tmp
@@ -539,11 +567,7 @@ sync_merge() {
     [[ -f "$HOME/$base" ]] && parts=("$HOME/$base" "${parts[@]}")
     tmp=$(mktemp "$HOME/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
-      | jq -Rc '([. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t)) as $a
-        # drop stale t:0 (imported) entries existing with t:!=0
-        | (($a | map(select(.t != 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $live
-           | $a | map(if .t == 0 and $live[.c] then empty else . end) | .[])' \
-      > "$tmp"; then
+      | merge_lines "$tmpdir" 1 > "$tmp"; then
       if cmp -s -- "$HOME/$base" "$tmp"; then
         rm -f -- "$tmp" # unchanged: keep in-place mtime so the next push is a no-op
       else
@@ -802,16 +826,17 @@ cmd_stats() {
 
 # dedupe + cap $1 (a history file) to the newest $2 lines
 compact_file() {
-  local f=$1 n=$2 tmp
+  local f=$1 n=$2 tmp d
+  d=$(mktemp -d)
   tmp=$(mktemp "${f}.XXXXXX") # 0600, same dir as $f so mv is atomic
-  if prog "compact" < "$f" \
-    | jq -Rc --argjson n "$n" '[. , inputs | fromjson? | select(. != null)] | unique | sort_by(.t) | .[ ((length - $n) as $s | if $s < 0 then 0 else $s end) : ] | .[]' \
-    > "$tmp"; then
-    mv "$tmp" "$f"
+  if { prog "compact" < "$f"; } | merge_lines "$d" 0 \
+    | { (( n == 0 )) && cat > /dev/null || tail -n "$n"; } > "$tmp"; then
+    mv -- "$tmp" "$f"
   else
     rm -f "$tmp"
     echo "shtory: compact of ${f##*/} failed" >&2
   fi
+  rm -rf "$d"
 }
 
 cmd_compact() {
