@@ -718,7 +718,7 @@ timeline_lines() { # header + per-host rows into lines[]
   local i
   l+=("$(printf '%*s%s  %*s %*s' "$(( namew + 2 ))" '' "$axis" "$wN" cmds "$wD" days)")
   for i in "${!names[@]}"; do
-    l+=("$(printf '%-*s  %s  %*s %*s' "$namew" "${names[i]}" "${bars[i]}" "$wN" "${ns[i]}" "$wD" "${ds[i]}")")
+    l+=("$(printf '%*s  %s  %*s %*s' "$namew" "${names[i]}" "${bars[i]}" "$wN" "${ns[i]}" "$wD" "${ds[i]}")")
   done
   lines=("${l[@]}")
 }
@@ -750,7 +750,7 @@ stats_timeline_gist() {
 
 # per-host activity histogram
 stats_timeline() {
-  local W=40 f h fl first last n size cols i=0
+  local W=40 f h fl first last n size cols i=0 tn=0
   rows=(); ns=(); ds=(); gstart=''; gend=''; namew=0; s=''; e=''
   # per-file jq extract t>0 values; awk binning
   tmpd=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
@@ -766,7 +766,7 @@ stats_timeline() {
     [[ -n $fl ]] || continue
     first=${fl%% *}; rest=${fl#* }; last=${rest%% *}; n=${rest##* }
     rows+=("$tfile $h $first $last $n")
-    (( ${#h} > namew )) && namew=${#h}
+    tn=$(( tn + n ))
     if [[ -z $gstart || $first -lt $gstart ]]; then gstart=$first; fi
     if [[ -z $gend || $last -gt $gend ]]; then gend=$last; fi
   done
@@ -774,8 +774,10 @@ stats_timeline() {
     echo "shtory: stats: no history with timestamps (only t:0 imports)" >&2
     return 1
   fi
-  # oldest first-used host first (stable for equal first)
-  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -k3,3n)
+  # combine hosts for TOTAL row; then sort by recent use
+  cat -- "$tmpd"/* > "$tmpd/total"
+  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -k4,4nr)
+  rows=("$tmpd/total TOTAL $gstart $gend $tn" "${rows[@]}")
   span=$(( gend - gstart ))
   s=$(date -u -d "@$gstart" +%Y-%m-%d)
   e=$(date -u -d "@$gend" +%Y-%m-%d)
@@ -783,8 +785,10 @@ stats_timeline() {
   # wN/wD must be known before W can be clamped to the terminal
   local r rest x
   for r in "${rows[@]}"; do
-    f=${r%% *}; rest=${r#* }; rest=${rest#* } # drop f, h
+    f=${r%% *}; rest=${r#* } # drop f
+    h=${rest%% *}; rest=${rest#* }
     first=${rest%% *}; rest=${rest#* }; last=${rest%% *}; n=${rest##* }
+    (( ${#h} > namew )) && namew=${#h}
     ns+=("$n"); ds+=("$(( (last - first) / 86400 ))")
   done
   wN=4; wD=4
