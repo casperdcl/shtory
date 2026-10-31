@@ -96,8 +96,8 @@ Per-host command count, timeline, most frequent executed.
 shtory stats [--timeline] [--cmd <n>] [--dir <n>]
 ```
 
-Timeline example:
-
+- `--cmd`, `--dir <n>`: show `n` most frequent commands/directories
+- `--timeline`: if `SHTORY_GIST_ID` is set, also pushes the histogram to `SHTORY_GIST_FILE` (default `shtory.stats`) via `gh` for display via e.g. [svgist](https://github.com/casperdcl/svgist.cdcl.ml) embeds: \
 ![](https://svgist.cdcl.ml/0bfb38f71908213bd251765c066343a2?grid=1)
 
 ### compact

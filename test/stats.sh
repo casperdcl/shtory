@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # test: stats / compact (run via ./test.bash; needs $S from test/search.sh)
 source ./test/common.sh
+unset SHTORY_GIST_ID SHTORY_GIST_FILE # never touch a real gist in tests
 
 echo "# stats / compact"
 assert_eq "stats hostA" '{"host":"hostA","commands":5,"first":"1970-01-01T00:16:40Z","last":"1970-01-01T00:23:20Z","failed":1}' \
@@ -45,6 +46,40 @@ printf '{"t":0,"d":"","e":0,"c":"i"}\n' > "$GN/.bash_history.h.jsonl"
 out=$(HOME=$GN "$B" stats --timeline 2>&1); rc=$?
 assert_rc "stats --timeline t:0-only rc 1" 1 $rc
 [[ $out == *"no history with timestamps"* ]] && ok "stats --timeline t:0-only warns" || bad "stats --timeline t:0-only warns ($out)"
+# gist: SHTORY_GIST_ID makes --timeline push the histogram text via `gh gist edit`
+GB=$T/ghbin; mkdir -p "$GB"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$0.args"' 'cp -- "${!#}" "$0.file"' > "$GB/gh"
+chmod +x "$GB/gh"
+out=$(PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline 2>&1); rc=$?
+assert_rc "gist gh rc 0" 0 $rc
+[[ $out == *"shtory: gist g1 updated"* ]] && ok "gist success message" || bad "gist success message ($out)"
+[[ $(cat "$GB/gh.args") == $'gist\nedit\ng1\n-f\nshtory.stats\n/'*'/shtory.stats' ]] && ok "gist gh args + default file" || bad "gist gh args + default file ($(cat "$GB/gh.args" | tr '\n' ' '))"
+grep -q 'aa' "$GB/gh.file" && [[ $(head -1 "$GB/gh.file") == *" cmds days" ]] && ok "gist text content" || bad "gist text content ($(head -1 "$GB/gh.file"))"
+all50=1; while IFS= read -r l; do (( ${#l} <= 50 )) || all50=0; done < "$GB/gh.file"
+[[ $all50 == 1 ]] && ok "gist lines <= 50 chars" || bad "gist lines <= 50 chars"
+rm -f "$GB/gh.args"
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 SHTORY_GIST_FILE=hist.txt HOME=$G setsid "$B" stats --timeline >/dev/null
+[[ $(sed -n 5p "$GB/gh.args") == hist.txt && $(tail -1 "$GB/gh.args") == /*/hist.txt ]] && ok "gist SHTORY_GIST_FILE override" || bad "gist SHTORY_GIST_FILE override ($(tr '\n' ' ' < "$GB/gh.args"))"
+rm -f "$GB/gh.args"
+HOME=$G setsid "$B" stats --timeline >/dev/null
+[[ ! -e $GB/gh.args ]] && ok "gist not called without SHTORY_GIST_ID" || bad "gist not called without SHTORY_GIST_ID"
+printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$GB/gh"
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline >/dev/null 2>&1
+assert_rc "gist gh failure propagates" 1 $?
+# empty gist: -f fails with "no file" -> retry with -a
+cat > "$GB/gh" <<'EOF'
+#!/usr/bin/env bash
+if [[ $4 == -f ]]; then
+  echo 'gist has no file "x"' >&2
+  exit 1
+fi
+printf '%s\n' "$@" > "$0.args"
+EOF
+chmod +x "$GB/gh"
+rm -f "$GB/gh.args"
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline >/dev/null 2>&1
+assert_rc "gist -a fallback rc 0" 0 $?
+[[ $(sed -n 4p "$GB/gh.args") == -a && $(sed -n 5p "$GB/gh.args") == shtory.stats ]] && ok "gist -a fallback args" || bad "gist -a fallback args ($(tr '\n' ' ' < "$GB/gh.args"))"
 printf '%s\n' \
   '{"t":1,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":2,"d":"/uniquedir1","e":0,"c":"zzztop"}' \
   '{"t":3,"d":"/uniquedir1","e":0,"c":"zzztop"}' '{"t":4,"d":"/uniquedir1","e":0,"c":"qqq"}' \

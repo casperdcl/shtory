@@ -38,8 +38,10 @@ subcommands:
       --compact <n>: while syncing, run compact (implies --self)
   stats [--timeline] [--cmd <n>] [--dir <n>]
           per-host summary
-      --timeline: per-host activity histogram over time
-      --cmd, --dir: most frequent commands/dirs
+      --timeline: per-host activity histogram over time;
+        if SHTORY_GIST_ID is set, also \`gh gist edit\`s
+        $SHTORY_GIST_FILE (default shtory.stats)
+      --cmd, --dir <n>: most frequent commands/dirs
   compact <n>
           deduplicate & cap each local history file to N lines
 
@@ -673,10 +675,83 @@ cmd_sync() {
   done
 }
 
+# bin global rows into a $1-cell-wide grid; sets names/bars
+timeline_grid() {
+  local W=$1 ramp='_▁▂▃▄▅▆▇█' c idx out max f rest h first last i
+  local -a cnt=()
+  names=(); bars=()
+  for r in "${rows[@]}"; do
+    f=${r%% *}; rest=${r#* }
+    h=${rest%% *}; rest=${rest#* }
+    first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
+    # per-bin counts over W-cell axis
+    mapfile -t cnt < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
+      { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
+        if (b >= w) b = w - 1
+        c[b]++
+      } END { for (i = 0; i < w; i++) print c[i] + 0
+      }' "$f")
+    max=0
+    for c in "${cnt[@]}"; do (( c > max )) && max=$c; done
+    out=''
+    for (( i = 0; i < W; i++ )); do
+      c=${cnt[i]}
+      if (( c > 0 )); then
+        idx=$(( c * 8 / max ))
+        out+=${ramp:idx:1}
+      else
+        out+=' '
+      fi
+    done
+    names+=("$h"); bars+=("$out")
+  done
+}
+
+timeline_axis() { # $1=W; sets axis from s/e
+  axis="$s"
+  (( $1 - ${#s} - ${#e} > 0 )) && axis+=$(printf '%*s' "$(( $1 - ${#s} - ${#e} ))" '')
+  axis+=$e
+}
+
+timeline_lines() { # header + per-host rows into lines[]
+  local -a l=()
+  local i
+  l+=("$(printf '%*s%s  %*s %*s' "$(( namew + 2 ))" '' "$axis" "$wN" cmds "$wD" days)")
+  for i in "${!names[@]}"; do
+    l+=("$(printf '%-*s  %s  %*s %*s' "$namew" "${names[i]}" "${bars[i]}" "$wN" "${ns[i]}" "$wD" "${ds[i]}")")
+  done
+  lines=("${l[@]}")
+}
+
+# render grid to GitHub $SHTORY_GIST_ID (50 char width)
+stats_timeline_gist() {
+  local W=$(( 50 - namew - wN - wD - 5 ))
+  (( W < 20 )) && W=20
+  timeline_grid "$W"
+  timeline_axis "$W"
+  timeline_lines
+  local g="${SHTORY_GIST_FILE:-shtory.stats}"
+  g=${g##*/}
+  [[ -n $g ]] || g=shtory.stats
+  local f="$tmpd/$g" err rc=0
+  printf '%s\n' "${lines[@]}" > "$f"
+  err=$(gh gist edit "$SHTORY_GIST_ID" -f "$g" "$f" 2>&1) || rc=$?
+  if (( rc )) && [[ $err == *"no file"* ]]; then
+    err=''; rc=0 # gist has no files yet
+    err=$(gh gist edit "$SHTORY_GIST_ID" -a "$g" "$f" 2>&1) || rc=$?
+  fi
+  if (( rc )); then
+    echo "shtory: gist edit: $err" >&2
+  else
+    echo "shtory: gist $SHTORY_GIST_ID updated"
+  fi
+  return $rc
+}
+
 # per-host activity histogram
 stats_timeline() {
-  local W=40 namew=0 f h fl first last n gstart='' gend='' span s e axis size cols i=0
-  local -a rows=()
+  local W=40 f h fl first last n size cols i=0
+  rows=(); ns=(); ds=(); gstart=''; gend=''; namew=0; s=''; e=''
   # per-file jq extract t>0 values; awk binning
   tmpd=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
   trap 'rm -rf "${tmpd-}"' EXIT
@@ -706,14 +781,13 @@ stats_timeline() {
   e=$(date -u -d "@$gend" +%Y-%m-%d)
   # row width = name(namew) + 2sp + axis(W) + 2sp + count(wN) + 1sp + days(wD);
   # wN/wD must be known before W can be clamped to the terminal
-  local r rest
-  local -a ns=() ds=()
+  local r rest x
   for r in "${rows[@]}"; do
     f=${r%% *}; rest=${r#* }; rest=${rest#* } # drop f, h
     first=${rest%% *}; rest=${rest#* }; last=${rest%% *}; n=${rest##* }
     ns+=("$n"); ds+=("$(( (last - first) / 86400 ))")
   done
-  local wN=4 wD=4 x
+  wN=4; wD=4
   for x in "${ns[@]}"; do (( ${#x} > wN )) && wN=${#x}; done
   for x in "${ds[@]}"; do (( ${#x} > wD )) && wD=${#x}; done
   # Termux: [[ -t 1 ]] can report false on a real pty; use the proven stty-via-/dev/tty pattern
@@ -724,41 +798,15 @@ stats_timeline() {
     fi
   fi
   (( W < 20 )) && W=20 # floor: the two 10-char dates alone need W=20
-  axis="$s"
-  (( W - ${#s} - ${#e} > 0 )) && axis+=$(printf '%*s' "$(( W - ${#s} - ${#e} ))" '')
-  axis+=$e
-  local ramp='_▁▂▃▄▅▆▇█'
-  local c idx out max
-  local -a cnt=() names=() bars=()
-  for r in "${rows[@]}"; do
-    f=${r%% *}; rest=${r#* }
-    h=${rest%% *}; rest=${rest#* }
-    first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
-    # per-bin counts over W-cell axis
-    mapfile -t cnt < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
-          { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
-            if (b >= w) b = w - 1
-            c[b]++ }
-          END { for (i = 0; i < w; i++) print c[i] + 0 }' "$f")
-    max=0
-    for c in "${cnt[@]}"; do (( c > max )) && max=$c; done
-    out=''
-    for (( i = 0; i < W; i++ )); do
-      c=${cnt[i]}
-      if (( c > 0 )); then
-        idx=$(( c * 8 / max ))
-        out+=${ramp:idx:1}
-      else
-        out+=' '
-      fi
-    done
-    names+=("$h"); bars+=("$out")
-  done
-  local i
-  printf '%*s%s  %*s %*s\n' "$(( namew + 2 ))" '' "$axis" "$wN" cmds "$wD" days
-  for i in "${!names[@]}"; do
-    printf '%-*s  %s  %*s %*s\n' "$namew" "${names[i]}" "${bars[i]}" "$wN" "${ns[i]}" "$wD" "${ds[i]}"
-  done
+  timeline_grid "$W"
+  timeline_axis "$W"
+  timeline_lines
+  printf '%s\n' "${lines[@]}"
+  if [[ -n ${SHTORY_GIST_ID-} ]]; then
+    stats_timeline_gist
+    return $?
+  fi
+  return 0
 }
 
 cmd_stats() {
