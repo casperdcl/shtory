@@ -2,13 +2,11 @@
 
 [![CI](https://github.com/casperdcl/shtory/actions/workflows/ci.yml/badge.svg)](https://github.com/casperdcl/shtory/actions/workflows/ci.yml)
 
-Supercharge bash history.
+Bash history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): shell scripts using just [coreutils](https://en.wikipedia.org/wiki/GNU_Core_Utilities)/[`jq`](https://github.com/jqlang/jq)/[`fzf`](https://github.com/junegunn/fzf).
 
 - logs every command (including path, time & exit code) to `~/.bash_history.$HOSTNAME.jsonl`
 - interactive search
-- serverless sync via `ssh`
-
-All in a pure bash script.
+- serverless efficient merge/sync via `rsync`/`ssh`
 
 ## Subcommands
 
@@ -24,13 +22,13 @@ shtory install --import
 
 - `--import`: also include existing `~/.bash_history` (with no path/time/exit code info)
 
-This appends a `shtory` block to `~/.bashrc`.
+A `shtory` block is upserted in `~/.bashrc` (hook, keybinding & tab completion).
 
 > [!TIP]
 > To skip logging any commands matching a regex, use `SHTORY_SKIP`; e.g. add to `~/.bashrc`:
 >
 > ```bash
-> export SHTORY_SKIP='export .*(KEY|TOKEN).*=.+'
+> export SHTORY_SKIP='(KEY|TOKEN).*=.+'
 > ```
 
 ### search
@@ -50,9 +48,9 @@ shtory search [options] [<query>...]
 
 `query`:
 
-- case-insensitive PCRE
+- case-insensitive regex
 - on TTY with no query, search is interactive
-  + using `fzf` if available; bundled `tui-shtory` otherwise
+  + using `fzf` if available
 
 > [!NOTE]
 > <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc`:
@@ -79,10 +77,10 @@ Sync histories across multiple systems over `ssh`.
 shtory sync [--compact <n>] [--self] [<remote host>...]
 ```
 
-Pulls every remote host, merges differences (`jq` union), then pushes.
+Pulls every remote host, merges differences, then pushes.
 
-- `--self`: don't avoid overwriting a remote host's own history file with any local copy of it
 - `--compact <n>`: after pulling & merging, `compact` each file before pushing (implies `--self`)
+- `--self`: don't avoid overwriting a remote host's own history file with any local copy of it
 
 `remote host`:
 
@@ -90,15 +88,19 @@ Pulls every remote host, merges differences (`jq` union), then pushes.
 - a corresponding hostname should exist in `~/.ssh/config`
   - :warning: this should match the remote host's own `shtory hostname`, otherwise auto-detection won't work correctly
 
-## stats
+### stats
 
-Per-host command count, time ranges, nonzero exit count; or the most frequent commands/dirs.
+Per-host command count, timeline, most frequent executed.
 
 ```bash
-shtory stats [--cmd <n>] [--dir <n>]
+shtory stats [--timeline] [--cmd <n>] [--dir <n>]
 ```
 
-## compact
+Timeline example:
+
+![](https://svgist.cdcl.ml/0bfb38f71908213bd251765c066343a2?grid=1)
+
+### compact
 
 Deduplicate & keep newest `n` commands per file.
 
@@ -109,18 +111,34 @@ shtory compact <n>
 > [!NOTE]
 > To persist compactions when syncing to multiple hosts, use `shtory sync --compact <n>` instead.
 
+## Configuration
+
+env var | effect
+-- | --
+`SHTORY_TUI=1` | force builtin picker instead of `fzf`
+`SHTORY_SAFE=1` | merge via `jq` instead of coreutils (~50x slower but full JSON-compat)
+`SHTORY_NOPROGRESS=1` | disable `tqdm` progress
+`SHTORY_BASHRC` | (un)install target (default `~/.bashrc`)
+
 ## Alternatives
+
+Think your few megabytes of bash history worthy of session IDs, runtime durations, SQL databases, webservers, and 200k+ lines of Rust? Non-POSIX-compliant overkill goodies exist!
 
 tool | storage | sync | search | notes
 -- | -- | -- | -- | --
-[![shtory](https://img.shields.io/github/stars/casperdcl/shtory?label=shtory)](https://github.com/casperdcl/shtory) | **per-host JSONL** | **serverless** `rsync` over **ssh** | TUI | **one bash file, no web auth, history never leaves your own machines**
-[![bashhub](https://img.shields.io/github/stars/rcaloras/bashhub-client?label=bashhub)](https://github.com/rcaloras/bashhub-client) | unknown ([closed-source](https://github.com/rcaloras/bashhub-client/issues/47)) | built-in | basic, [10k limit](https://github.com/rcaloras/bashhub-client/issues/118) | python client
+[`shtory`](https://github.com/casperdcl/shtory) | **per-host JSONL** | **serverless** `rsync` over SSH | TUI | **one bash file, no web auth, history never leaves your own machines**
 [![atuin](https://img.shields.io/github/stars/atuinsh/atuin?label=atuin)](https://github.com/atuinsh/atuin) | SQLite | E2EE | TUI, FTS, scopes | binary + server
+[![McFly](https://img.shields.io/github/stars/cantino/mcfly?label=McFly)](https://github.com/cantino/mcfly) | SQLite | none | neural-ranked | binary
 [![hstr](https://img.shields.io/github/stars/dvorka-oss/hstr?label=hstr)](https://github.com/dvorka-oss/hstr) | `.bash_history` | none | TUI | no context (exit code/cwd/time)
 [![hishtory](https://img.shields.io/github/stars/ddworken/hishtory?label=hishtory)](https://github.com/ddworken/hishtory) | SQLite | SOPS E2EE | SQL | binary + server
-[![McFly](https://img.shields.io/github/stars/cantino/mcfly?label=McFly)](https://github.com/cantino/mcfly) | SQLite | none | neural-ranked | binary
+[![bashhub](https://img.shields.io/github/stars/rcaloras/bashhub-client?label=bashhub)](https://github.com/rcaloras/bashhub-client) | unknown ([closed-source](https://github.com/rcaloras/bashhub-client/issues/47)) | built-in | basic, [10k limit](https://github.com/rcaloras/bashhub-client/issues/118) | python client
+[![suvadu](https://img.shields.io/github/stars/AppachiTech/suvadu?label=suvadu)](https://github.com/AppachiTech/suvadu) | SQLite | none | TUI, AI/MCP | binary
+[![pxh](https://img.shields.io/github/stars/chipturner/pxhist?label=pxh)](https://github.com/chipturner/pxhist) | SQLite | serverless `ssh` | TUI | binary
 
 ## Credits
+
+[Things worth writing are worth taking a long time to write.](https://gist.cdcl.ml/the-problem/)
+Unit tests & TUI are vibe-coded; but `shtory` itself isn't.
 
 [![git-fame](https://git-fame.cdcl.ml/gh/casperdcl/shtory?auth=share)](https://git-fame.cdcl.ml/gh/casperdcl/shtory?auth=share)
 
