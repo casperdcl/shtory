@@ -49,7 +49,7 @@ search options:
   -h, --hostname <name>   pattern, default: '*' (all hosts)
   -H, --localhost         same as -h="${SHTORY_HOSTNAME:-$HOSTNAME}"
   -c, --cwd               only commands run in $PWD
-  -s, --sort <order>      newest (default)/oldest/count
+  -s, --sort <order>      frecency (default)/newest/oldest/count
   -n, --limit <n>         max results, default 0 (unlimited)
   -z, --zero              only commands with exit code 0
   -Z, --nonzero           only commands with non-zero exit code
@@ -154,7 +154,7 @@ if [[ $- == *i* ]]; then
               [[ $w == "$cur"* ]] && COMPREPLY+=("$w")
             done
             ;;
-          -s|--sort)     COMPREPLY=($(compgen -W 'newest oldest count' -- "$cur")) ;;
+          -s|--sort)     COMPREPLY=($(compgen -W 'frecency newest oldest count' -- "$cur")) ;;
           -*)            ;;
           *)             COMPREPLY=($(compgen -W '-h --hostname -H --localhost -c --cwd -s --sort -n --limit -z --zero -Z --nonzero --' -- "$cur")) ;;
         esac
@@ -329,6 +329,7 @@ else
   | ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
       elif $o == "oldest" then group_by(.c) | map(min_by(.t)) | sort_by(.t)
       elif $o == "count" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
+      elif $o == "frecency" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, s:(length * pow(2; (max_by(.t).t - now) / (30*86400)))}) | sort_by(-.s, -.t)
       else . end )
   | (if $n == 0 then . else .[0:$n] end)
   | .[]
@@ -398,7 +399,7 @@ search_loop() {
 }
 
 cmd_search() {
-  local host='*' cwd='' order=newest limit='' efilter='' q='' f h
+  local host='*' cwd='' order=frecency limit='' efilter='' q='' f h
   local -a files=() query_words=()
   while [[ $# -gt 0 ]]; do
     case $1 in
@@ -414,7 +415,7 @@ cmd_search() {
       *) query_words+=("$1"); shift ;;
     esac
   done
-  case $order in newest|oldest|count) ;; *) echo "shtory: bad --sort: $order" >&2; return 2 ;; esac
+  case $order in newest|oldest|count|frecency) ;; *) echo "shtory: bad --sort: $order" >&2; return 2 ;; esac
   if [[ -n $limit && ! $limit =~ ^[0-9]+$ ]]; then
     echo "shtory: bad --limit: $limit" >&2; return 2
   fi
