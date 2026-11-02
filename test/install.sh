@@ -13,6 +13,7 @@ echo 'echo kept' > "$RC"
 SHTORY_BASHRC=$RC "$B" install >/dev/null
 SHTORY_BASHRC=$RC "$B" install >/dev/null
 assert_eq "idempotent install" "1" "$(grep -cF '>>> shtory >>>' "$RC")"
+assert_eq "re-install doesn't stack blank lines" "1" "$(sed -n '1,/>>> shtory >>>/p' "$RC" | grep -c '^$')"
 assert_eq "preserves first line" "echo kept" "$(head -1 "$RC")"
 grep -qF 'complete -F _shtory shtory' "$RC" && ok "completion registered" || bad "completion registered"
 grep -qF '__shtory_log' "$RC" && ok "hook present" || bad "hook present"

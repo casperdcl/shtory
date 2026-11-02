@@ -180,12 +180,21 @@ fi
 EOF
 }
 
-remove_block() { # $1 = bashrc path; rewrite in place, preserving permissions
+remove_block() { # $1 = rc path; rewrite in place, preserving permissions
   local rc=$1 tmp
   tmp=$(mktemp "${rc}.XXXXXX") # same dir as $rc so mv is atomic
-  awk -v s="$MARK_START" -v e="$MARK_END" '$0==s{skip=1} $0==e{skip=0; next} !skip' "$rc" > "$tmp"
-  chmod --reference="$rc" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rc"
+  awk -v s="$MARK_START" -v e="$MARK_END" '
+    BEGIN { have = 0; skip = 0 }
+    skip { if ($0 == e) skip = 0; next }
+    $0 == s {
+      if (have && prev != "") print prev
+      skip = 1; have = 0; next
+    }
+    { if (have) print prev; prev = $0; have = 1 }
+    END { if (have && !skip) print prev }
+  ' "$rcfile" > "$tmp"
+  chmod --reference="$rcfile" "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$rcfile"
 }
 
 # rewrite $1 in place (preserving permissions), dropping lines matching $2
