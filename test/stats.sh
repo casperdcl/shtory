@@ -107,6 +107,10 @@ HOME=$CE "$B" compact 10
 assert_eq "compact n>length: keep all, deduped, ascending" "1 3 5" "$(jq -r .t "$CE/.shtory.e.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 HOME=$CE "$B" compact 0
 assert_eq "compact n=0: empties" "0" "$(wc -l < "$CE/.shtory.e.jsonl")"
+# SHTORY_SAFE=1: jq merge fallback (dedupe + t-sort)
+printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":5,"d":"/z","e":0,"c":"b"}' '{"t":3,"d":"/z","e":0,"c":"c"}' '{"t":3,"d":"/z","e":0,"c":"c"}' > "$CE/.shtory.e2.jsonl"
+HOME=$CE SHTORY_SAFE=1 "$B" compact 10
+assert_eq "compact SHTORY_SAFE=1: jq dedupe + t-sort" "1 3 5" "$(jq -r .t "$CE/.shtory.e2.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":2,"d":"/z","e":0,"c":"b"}' > "$CE/.shtory.m.jsonl"
 chmod 600 "$CE/.shtory.m.jsonl"
 HOME=$CE "$B" compact 5

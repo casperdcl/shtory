@@ -237,6 +237,20 @@ assert_eq "sync trims stale t:0 (live counterpart in same file)" $'{"t":0,"d":""
 assert_eq "trimmed t:0 not re-pushed to remote" $'{"t":0,"d":"","e":0,"c":"kept"}\n{"t":1,"d":"/x","e":0,"c":"stale"}' \
   "$(cat "$R7/h7/.shtory.me.jsonl")"
 
+# SHTORY_SAFE=1: jq merge fallback (union, t-sort, dedupe, stale t:0 trim)
+L9=$T/safe_home; R9=$T/safe_remote
+mkdir -p "$L9" "$R9/h9"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"stale"}' '{"t":0,"d":"","e":0,"c":"kept"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' '{"t":100,"d":"/b","e":0,"c":"local-only"}' > "$L9/.shtory.h9.jsonl"
+printf '%s\n' '{"t":0,"d":"","e":0,"c":"stale"}' '{"t":0,"d":"","e":0,"c":"kept"}' '{"t":1,"d":"/x","e":0,"c":"stale"}' '{"t":200,"d":"/c","e":0,"c":"remote-only"}' '{"t":300,"d":"/a","e":0,"c":"shared"}' > "$R9/h9/.shtory.h9.jsonl"
+printf 'h9\n' > "$T/ssh_hosts10"
+(
+  HOME=$L9 FAKE_REMOTE=$R9 FAKE_SSH_HOSTS=$T/ssh_hosts10 SHTORY_SAFE=1 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync h9
+) >/dev/null 2>&1
+assert_eq "SHTORY_SAFE=1: jq merge union, t-sorted, stale t:0 trimmed" \
+  $'{"t":0,"d":"","e":0,"c":"kept"}\n{"t":1,"d":"/x","e":0,"c":"stale"}\n{"t":100,"d":"/b","e":0,"c":"local-only"}\n{"t":200,"d":"/c","e":0,"c":"remote-only"}\n{"t":300,"d":"/a","e":0,"c":"shared"}' \
+  "$(cat "$L9/.shtory.h9.jsonl")"
+
 # sync: partial pull (rsync 23) merges what arrived, with a warning
 L6=$T/partial_home; R6=$T/partial_remote
 mkdir -p "$L6" "$R6/part"
