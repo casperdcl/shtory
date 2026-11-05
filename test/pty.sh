@@ -26,6 +26,21 @@ else
     "$SC" -qec "$B search" /dev/null 2>/dev/null | tr -d '\r')
   [[ $(lastline "$out") == *"git push"* ]] && ok "pty: numbered loop selects" || bad "pty: numbered loop selects ($(lastline "$out"))"
 
+  # fzf exits 0 with no output on Enter over an empty list (its contract):
+  # cmd_search must treat that as cancel, not as an empty selection
+  # (an empty selection wipes the caller's current line via READLINE_LINE='')
+  FZH=$T/fz_home; FNP=$T/fzpath; mkdir -p "$FZH" "$FNP"
+  for b in bash sh jq cat stty awk sleep; do
+    p=$(command -v "$b") && ln -sf "$p" "$FNP/$b"
+  done
+  printf '%s\n' '#!/usr/bin/env bash' 'sleep 1; exit 0' > "$FNP/fzf" # fzf: enter on empty list
+  chmod +x "$FNP/fzf"
+  : > "$FZH/.shtory.fz.jsonl"
+  { sleep 0.5; printf '\r'; sleep 2; } \
+    | SHELL=$FNP/bash PATH="$FNP" HOME=$FZH \
+    "$SC" -qec "$B search" /dev/null > "$T/fz_out" 2>/dev/null
+  assert_rc "fzf: enter on empty list cancels (rc 1, no wipe)" 1 $?
+
   # tui-shtory: rows from a file (EOF), keys via the pty
   printf 'alpha cmd\nbeta cmd\n' > "$T/tui_rows"
   out=$(printf 'a\n' | SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \

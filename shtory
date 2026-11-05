@@ -589,6 +589,9 @@ cmd_search() {
           return 1
         fi
       fi
+      # fzf exits 0 with no output on Enter over an empty list: treat as cancel
+      # (an empty selection would wipe READLINE_LINE in __shtory_pick)
+      [[ -n $sel_row ]] || return 1
       printf '%s\n' "${sel_row%%$'\t'*}"
       return 0
     fi
