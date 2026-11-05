@@ -60,6 +60,23 @@ EOF
   [[ $out != *substring* && $out != *unbound* && $out == *"averyveryveryverylongc"* ]] \
     && ok "pty: tui-shtory freeze overflow clips" || bad "pty: tui-shtory freeze overflow clips ($(lastline "$out"))"
 
+  # zsh: ctrl-r zle widget opens the numbered loop (keys via /dev/tty)
+  # and inserts the selection; TERM=linux because Termux has no xterm terminfo
+  if command -v zsh >/dev/null 2>&1; then
+    ZP=$T/zpty_home; mkdir -p "$ZP/bin"
+    for b in bash sh jq cat stty; do
+      p=$(command -v "$b") && ln -sf "$p" "$ZP/bin/$b"
+    done
+    ln -sf "$PWD/shtory" "$ZP/bin/shtory"
+    printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"echo zsel one"}' '{"t":2,"d":"/x","e":0,"c":"echo zsel two"}' \
+      > "$ZP/.shtory.zpty.jsonl"
+    SHELL=/usr/bin/zsh SHTORY_ZSHRC=$ZP/.zshrc "$B" install >/dev/null
+    out=$( { sleep 0.5; printf '\x12'; sleep 1.5; printf 'echo\n'; sleep 1.5; printf '1\n'; sleep 1.5; printf '\r'; sleep 1.5; printf 'exit\n'; sleep 0.5; } \
+      | HOME=$ZP PATH="$ZP/bin" TERM=linux \
+      "$SC" -qec "$(command -v zsh) -i" /dev/null 2>/dev/null | tr -d '\r' )
+    [[ $out == *"zsel two"* ]] && ok "pty: zsh ctrl-r widget inserts & runs" || bad "pty: zsh ctrl-r widget inserts & runs ($(lastline "$out"))"
+  fi
+
   # HISTCONTROL: the hook mirrors bash's history list, so ignoredups/ignorespace/
   # ignoreboth/erasedups are respected; input lines are spaced out (all-at-once
   # pty input is read ahead before the first prompt)

@@ -14,10 +14,10 @@ Shell history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): a s
 
 Place on `$PATH` and install:
 
-```bash
+```sh
 # optional: set persistent hostname
 export SHTORY_HOSTNAME=$HOSTNAME
-echo "export SHTORY_HOSTNAME=$SHTORY_HOSTNAME" >> ~/.bashrc
+echo "export SHTORY_HOSTNAME=$SHTORY_HOSTNAME" | tee -a ~/.bashrc ~/.zshrc
 
 # install shtory (and optional tui-shtory fallback if fzf unavailable)
 curl -fsSLO --output-dir ~/.local/bin/ https://raw.githubusercontent.com/casperdcl/shtory/main/{tui-,}shtory
@@ -26,12 +26,12 @@ shtory install --import
 
 - `--import`: also include existing `$HISTFILE` (with no path/time/exit code info)
 
-A `shtory` block is upserted in `~/.bashrc` (hook, keybinding & tab completion).
+A `shtory` block is upserted in the shell's rcfile (hook, keybinding & tab completion).
 
 > [!TIP]
-> To skip logging any commands matching a regex, use `SHTORY_SKIP`; e.g. add to `~/.bashrc`:
+> To skip logging any commands matching a regex, use `SHTORY_SKIP`; e.g. add to `~/.bashrc` or `~/.zshrc`:
 >
-> ```bash
+> ```sh
 > SHTORY_SKIP='(KEY|TOKEN).*=.+'
 > ```
 
@@ -39,7 +39,7 @@ A `shtory` block is upserted in `~/.bashrc` (hook, keybinding & tab completion).
 
 Interactively search for past commands.
 
-```bash
+```sh
 shtory search [options] [<query>...]
 ```
 
@@ -57,27 +57,27 @@ shtory search [options] [<query>...]
   + using `fzf` if available
 
 > [!NOTE]
-> <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc`:
+> <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc` or `~/.zshrc`:
 >
-> ```bash
+> ```sh
 > SHTORY_KEY='\C-r'
 > ```
 
 ### hostname
 
-Print or override the hostname used by `shtory` locally (`export SHTORY_HOSTNAME` in `~/.bashrc`).
+Print or override the hostname used by `shtory` locally (`export SHTORY_HOSTNAME` in `~/.bashrc` or `~/.zshrc`).
 
-```bash
+```sh
 shtory hostname [<host>]
 ```
 
-`${SHTORY_HOSTNAME:-$HOSTNAME}` determines which history JSONL file is written and searched.
+`${SHTORY_HOSTNAME:-$HOSTNAME}` (bash)/`${SHTORY_HOSTNAME:-$HOST}` (zsh) determines which history JSONL file is written and searched.
 
 ### sync
 
 Sync histories across multiple systems over `ssh`.
 
-```bash
+```sh
 shtory sync [--compact <n>] [--self] [<remote host>...]
 ```
 
@@ -96,7 +96,7 @@ Pulls every remote host, merges differences, then pushes.
 
 Per-host command count, timeline, most frequent executed.
 
-```bash
+```sh
 shtory stats [--timeline] [--cmd <n>] [--dir <n>]
 ```
 
@@ -108,7 +108,7 @@ shtory stats [--timeline] [--cmd <n>] [--dir <n>]
 
 Deduplicate & keep newest `n` commands per file.
 
-```bash
+```sh
 shtory compact <n>
 ```
 
@@ -119,6 +119,7 @@ shtory compact <n>
 
 env | effect
 -- | --
+`HIST_IGNORE_DUPS`, `HIST_IGNORE_SPACE` | see `man zshoptions`
 `HISTCONTROL`, `HISTIGNORE` | see `man bash`
 `HISTFILE` | [`install --import`](#installupdate) source
 -- | --
@@ -129,6 +130,7 @@ env | effect
 `SHTORY_NOPROGRESS=1` | disable `tqdm` progress
 `SHTORY_SAFE=1` | merge via `jq` instead of coreutils (~50x slower but full JSON-compat)
 `SHTORY_SKIP` | regex of commands not to log; see [`install/update`](#installupdate)
+`SHTORY_ZSHRC` | (un)install target (default `~/.zshrc`)
 
 ## Alternatives
 

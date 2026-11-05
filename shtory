@@ -22,7 +22,8 @@ supercharge shell history: per-host logs with search & serverless sync.
 
 subcommands:
   install [--import]
-          add hook & search keybinding to ~/.bashrc
+          add hook & search keybinding
+          (bash: ~/.bashrc, zsh: ~/.zshrc)
       --import: merges $HISTFILE into ~/.shtory.*.jsonl
   uninstall
           remove them again
@@ -62,9 +63,10 @@ MARK_START='# >>> shtory >>>'
 MARK_END='# <<< shtory <<<'
 
 bashrc() { printf '%s' "${SHTORY_BASHRC:-$HOME/.bashrc}"; }
+zshrc() { printf '%s' "${SHTORY_ZSHRC:-$HOME/.zshrc}"; }
 
 # the block appended to ~/.bashrc (quoted heredoc: expanded only in the user's shell)
-hook_block() {
+hook_block_bash() {
   cat <<'EOF'
 
 # >>> shtory >>>
@@ -180,6 +182,106 @@ fi
 EOF
 }
 
+# the block appended to ~/.zshrc (quoted heredoc: expanded only in the user's shell)
+# zshaddhistory fires when a line is added to the history list, before zsh's own
+# filtering, so HIST_IGNORE_DUPS/HIST_IGNORE_SPACE are mirrored in __shtory_zshaddhistory;
+# precmd then writes it with the command's exit code
+hook_block_zsh() {
+  cat <<'EOF'
+
+# >>> shtory >>>
+zmodload zsh/datetime 2>/dev/null # EPOCHSECONDS
+autoload -Uz add-zsh-hook
+__shtory_zshaddhistory() {
+  local cmd=${1%$'\n'}
+  [[ -n $cmd ]] || return 0
+  # the hook fires before zsh's own history filtering, so mirror it:
+  if [[ $cmd == ' '* ]] && [[ -o hist_ignore_space ]]; then
+    return 0
+  fi
+  # dups mirror is consecutive-only: hist_ignore_all_dups also skips
+  # non-consecutive repeats (accepted: search dedupes by command anyway)
+  if [[ $cmd == "${__shtory_last-}" ]] && [[ -o hist_ignore_dups || -o hist_ignore_all_dups ]]; then
+    return 0
+  fi
+  __shtory_last=$cmd
+  if [[ -n ${SHTORY_SKIP-} ]] && [[ $cmd =~ ${SHTORY_SKIP} ]]; then
+    return 0
+  fi
+  __shtory_cmd=$cmd
+}
+__shtory_log() {
+  # $? is the last command's exit status: zsh restores it before each precmd hook
+  local ec=$?
+  local cmd=${__shtory_cmd-}
+  [[ -n $cmd ]] || return 0
+  unset __shtory_cmd
+  local esc d f t
+  esc=${cmd//\\/\\\\}
+  esc=${esc//\"/\\\"}
+  esc=${esc//$'\n'/\\n}
+  esc=${esc//$'\t'/\\t}
+  esc=${esc//$'\r'/\\r}
+  esc=${esc//[[:cntrl:]]/}
+  d=${PWD//\\/\\\\}
+  d=${d//\"/\\\"}
+  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOST}.jsonl"
+  t=${EPOCHSECONDS:-$(date +%s)}
+  # creation mode 0600
+  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "$t" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
+  return 0
+}
+add-zsh-hook zshaddhistory __shtory_zshaddhistory
+add-zsh-hook precmd __shtory_log
+__shtory_pick() {
+  local sel
+  zle -I # interrupt any pending widget (e.g. vi-mode char wait)
+  # inside a widget, $(...) stdin is a pipe; the tty goes to /dev/tty
+  # (fzf/tui-shtory read keys from there anyway; the numbered loop needs it)
+  if sel=$(command shtory search < /dev/tty); then
+    LBUFFER=$sel
+    RBUFFER=
+    zle reset-prompt
+  fi
+}
+zle -N __shtory_pick
+bindkey "${SHTORY_KEY:-\C-r}" __shtory_pick
+if (( ${+functions[compdef]} )); then
+  # only when the user's zshrc has loaded the completion system
+  __shtory_comps() {
+    local sub cur h
+    local -a hs f reply
+    cur=${words[CURRENT]}
+    if (( CURRENT == 2 )); then
+      reply=(install uninstall search hostname sync stats compact help)
+      return
+    fi
+    sub=${words[2]}
+    for f in "$HOME"/.shtory.*.jsonl(N); do
+      h=${f##*/.shtory.}
+      hs+=("${h%.jsonl}")
+    done
+    case $sub in
+      install) reply=(--import) ;;
+      search)
+        case ${words[CURRENT-1]} in
+          -h|--hostname) reply=($hs '*' "${SHTORY_HOSTNAME:-$HOST}") ;;
+          -s|--sort)     reply=(frecency newest oldest count) ;;
+          -*) ;;
+          *) reply=(-h --hostname -H --localhost -c --cwd -s --sort -n --limit -z --zero -Z --nonzero) ;;
+        esac ;;
+      sync)
+        if [[ $cur == -* ]]; then reply=(--compact --self); else reply=($hs); fi ;;
+      stats) reply=(--timeline --cmd --dir) ;;
+    esac
+  }
+  compdef __shtory_comps shtory
+fi
+# <<< shtory <<<
+EOF
+}
+
 remove_block() { # $1 = rcfile (rewrite in place, preserving permissions)
   local rcfile=$1 tmp
   tmp=$(mktemp "${rcfile}.XXXXXX") # same dir as $rcfile so mv is atomic
@@ -216,15 +318,20 @@ drop_stale() {
 # (used by install --import)
 import_history() {
   # tmp/tmp2/out: global (EXIT trap on signal exit has no locals)
-  local src="${HISTFILE:-$HOME/.bash_history}" f n
+  local src f n
+  if [[ ${SHELL##*/} == zsh ]]; then
+    src="${HISTFILE:-$HOME/.zsh_history}"
+  else
+    src="${HISTFILE:-$HOME/.bash_history}"
+  fi
   tmp='' tmp2=''
   f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
   trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
-  # drop comments, dedupe against commands
-  if LC_ALL=C sed 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' "$src" \
+  # drop comments + zsh extended_history ": <ts>:<s>;" prefixes, dedupe against commands
+  if LC_ALL=C sed -e 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' -e 's/^: [0-9]*:[0-9]*;//' "$src" \
     | { LC_ALL=C grep -a -v '^#' || true; } \
     | prog import \
     | jq -Rcn --slurpfile ex <( [[ -f $f ]] && cat "$f" ) \
@@ -264,18 +371,23 @@ import_history() {
 }
 
 cmd_install() {
-  local rcfile import=0
+  local rcfile import=0 shell block
   while [[ $# -gt 0 ]]; do
     case $1 in
       --import) import=1; shift ;;
       -*) echo "shtory: unknown install option: $1" >&2; return 2 ;;
     esac
   done
-  rcfile=$(bashrc)
+  [[ ${SHELL##*/} == zsh ]] && shell=zsh || shell=bash
+  if [[ $shell == zsh ]]; then
+    rcfile=$(zshrc); block=hook_block_zsh
+  else
+    rcfile=$(bashrc); block=hook_block_bash
+  fi
   if [[ -f $rcfile ]] && grep -qF "$MARK_START" "$rcfile"; then
     remove_block "$rcfile"
   fi
-  hook_block >> "$rcfile"
+  "$block" >> "$rcfile"
   echo "shtory: block written to $rcfile — start a new shell (or source it)"
   if (( import )); then
     import_history
@@ -284,17 +396,18 @@ cmd_install() {
 
 cmd_uninstall() {
   local rcfile
-  rcfile=$(bashrc)
-  local found=0
+  if [[ ${SHELL##*/} == zsh ]]; then
+    rcfile=$(zshrc)
+  else
+    rcfile=$(bashrc)
+  fi
   if [[ -f $rcfile ]] && grep -qF "$MARK_START" "$rcfile"; then
     remove_block "$rcfile"
-    found=1
-  fi
-  if [[ $found -eq 0 ]]; then
+    echo "shtory: block removed from $rcfile — start a new shell (or source it)"
+  else
     echo "shtory: no shtory block in $rcfile" >&2
     return 1
   fi
-  echo "shtory: block removed from $rcfile — start a new shell (or source it)"
 }
 
 # --- search -----------------------------------------------------------------
@@ -497,7 +610,11 @@ cmd_hostname() {
     echo "shtory: invalid hostname: $name" >&2
     return 2
   fi
-  rcfile=$(bashrc)
+  if [[ ${SHELL##*/} == zsh ]]; then
+    rcfile=$(zshrc)
+  else
+    rcfile=$(bashrc)
+  fi
   line="export SHTORY_HOSTNAME=$name"
   strip_line "$rcfile" 'SHTORY_HOSTNAME='
   printf '%s\n' "$line" >> "$rcfile"

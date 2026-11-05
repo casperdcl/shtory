@@ -31,5 +31,5 @@ One JSON object per line in `~/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl`:
 
 - commands are captured from bash's history list (`history 1` at prompt time), so `HISTCONTROL` is respected (ignoredups/ignorespace/ignoreboth/erasedups), and `history -r` re-reads (new sessions, per-prompt re-reads in `.bash_aliases`) do not re-log the last entry
   + use `SHTORY_SKIP` regex to exclude commands
-- history JSONL files are as sensitive as `~/.bash_history` (could contain secrets) and `sync` transfers via `rsync` as-is, so ensure ssh config/keys are sane, and keep the files out of any untrusted dotfile sync
+- history JSONL files are as sensitive as `~/.bash_history` & `~/.zsh_history` (could contain secrets) and `sync` transfers via `rsync` as-is, so ensure ssh config/keys are sane, and keep the files out of any untrusted dotfile sync
 - `sync` host detection treats a host as configured iff `ssh -G` resolves it to a `HostName` different from the alias itself
