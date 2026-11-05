@@ -88,6 +88,8 @@ __shtory_log() {
   if [[ -z ${__shtory_last_listlen-} ]]; then
     [[ -s ${HISTFILE:-$HOME/.bash_history} ]] && __shtory_last_listlen=$n || __shtory_last_listlen=$((n - 1))
   fi
+  # list shrank (history -c/-d restarted numbering): re-baseline
+  (( n < __shtory_last_listlen )) && __shtory_last_listlen=$((n - 1))
   (( n <= __shtory_last_listlen )) && return 0
   __shtory_last_listlen=$n
   cmd=${BASH_REMATCH[2]}

@@ -95,4 +95,14 @@ EOF
   assert_eq "HISTCONTROL=ignoredups" $'echo a\necho b' "$(hc_run ignoredups 'echo a' 'echo a' 'echo b')"
   assert_eq "HISTCONTROL=ignorespace" $'echo a\necho c' "$(hc_run ignorespace 'echo a' ' echo b' 'echo c')"
   assert_eq "HISTCONTROL=ignoreboth" $'echo a\necho c' "$(hc_run ignoreboth 'echo a' ' echo b' 'echo a' 'echo c')"
+
+  # history -c restarts numbering: logging must continue, not skip until the
+  # list grows past the old maximum
+  HC2=$T/hc2_home; mkdir -p "$HC2"
+  SHTORY_BASHRC=$HC2/.bashrc HOME=$HC2 "$B" install >/dev/null
+  { for line in 'echo a' 'echo b' 'history -c' 'echo c' 'echo d'; do sleep 0.25; printf '%s\n' "$line"; done
+    sleep 0.25; printf 'exit\n'; sleep 0.5; } \
+    | SHELL=$NP/bash PATH=$NP HOME=$HC2 "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
+  assert_eq "history -c: logging continues after clear" $'echo a\necho b\necho c\necho d' \
+    "$(jq -r .c "$HC2"/.shtory.*.jsonl 2>/dev/null)"
 fi
