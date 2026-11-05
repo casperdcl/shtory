@@ -19,7 +19,7 @@ else
   done
   PTH=$T/pty_home; mkdir -p "$PTH"
   printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"git status"}' '{"t":2,"d":"/x","e":0,"c":"git push"}' \
-    > "$PTH/.bash_history.pty.jsonl"
+    > "$PTH/.shtory.pty.jsonl"
 
   # numbered loop: type a pattern, select row 1 (newest match)
   out=$(printf 'git\n1\n' | SHELL=$NP/bash PATH=$NP HOME=$PTH \
@@ -67,12 +67,12 @@ EOF
   SHTORY_BASHRC=$HC/.bashrc HOME=$HC "$B" install >/dev/null
   hc_run() { # $1 = HISTCONTROL value, rest = commands; prints saved commands
     local hc=$1 line; shift
-    rm -f "$HC/.bash_history" "$HC"/.bash_history.*.jsonl
-    printf 'export HISTCONTROL=%s\n' "$hc" >> "$HC/.bashrc"
+    rm -f "$HC/.bash_history" "$HC"/.shtory.*.jsonl
+    printf 'HISTCONTROL=%s\n' "$hc" >> "$HC/.bashrc"
     { for line in "$@"; do sleep 0.25; printf '%s\n' "$line"; done
       sleep 0.25; printf 'exit\n'; sleep 0.5; } \
       | SHELL=$NP/bash PATH=$NP HOME=$HC "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
-    jq -r .c "$HC"/.bash_history.*.jsonl 2>/dev/null
+    jq -r .c "$HC"/.shtory.*.jsonl 2>/dev/null
   }
   assert_eq "HISTCONTROL unset saves all" $'echo a\necho a\necho b' "$(hc_run '' 'echo a' 'echo a' 'echo b')"
   assert_eq "HISTCONTROL=ignoredups" $'echo a\necho b' "$(hc_run ignoredups 'echo a' 'echo a' 'echo b')"

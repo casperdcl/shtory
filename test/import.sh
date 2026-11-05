@@ -3,7 +3,7 @@
 source ./test/common.sh
 
 echo "# import (install --import)"
-I=$T/importhome; F=$I/.bash_history.imphost.jsonl; mkdir -p "$I"
+I=$T/importhome; F=$I/.shtory.imphost.jsonl; mkdir -p "$I"
 printf 'ls\ncd /tmp\nls\ngit status\n\n' > "$I/.bash_history"
 HOME=$I SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null
 assert_eq "install --import: block written" "1" "$(grep -cF '>>> shtory >>>' "$I/.bashrc")"
@@ -52,7 +52,7 @@ assert_eq "comment (#) lines skipped" \
 I2=$T/importempty; mkdir -p "$I2"
 printf 'should-not-import\n' > "$I2/.bash_history"
 HOME=$I2 SHTORY_HOSTNAME=imphost "$B" install >/dev/null
-[[ ! -f $I2/.bash_history.imphost.jsonl ]] && ok "plain install: no import" || bad "plain install: no import"
+[[ ! -f $I2/.shtory.imphost.jsonl ]] && ok "plain install: no import" || bad "plain install: no import"
 I3=$T/importempty3; mkdir -p "$I3"
 HOME=$I3 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null 2>&1
 assert_rc "install --import: no .bash_history is a no-op (rc 0)" 0 $?
@@ -62,5 +62,5 @@ I4=$T/importbinary; mkdir -p "$I4"
 printf 'A cmd\na cmd\n#123\necho \0nul\nz cmd\n' > "$I4/.bash_history"
 HOME=$I4 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null 2>&1
 assert_rc "import: binary+mixed-case history does not fail" 0 $?
-assert_eq "import: binary+mixed-case imports 4 commands" 4 "$(wc -l < "$I4/.bash_history.imphost.jsonl")"
-assert_eq "import: control chars stripped" "echo nul" "$(jq -r 'select(.c | startswith("echo")) | .c' "$I4/.bash_history.imphost.jsonl")"
+assert_eq "import: binary+mixed-case imports 4 commands" 4 "$(wc -l < "$I4/.shtory.imphost.jsonl")"
+assert_eq "import: control chars stripped" "echo nul" "$(jq -r 'select(.c | startswith("echo")) | .c' "$I4/.shtory.imphost.jsonl")"

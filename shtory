@@ -18,12 +18,12 @@ usage() {
   cat <<'EOF'
 shtory <subcommand> [options]
 
-supercharge bash history: per-host logs with search & serverless sync.
+supercharge shell history: per-host logs with search & serverless sync.
 
 subcommands:
   install [--import]
           add hook & search keybinding to ~/.bashrc
-      --import: merges ~/.bash_history into ~/.bash_history.*.jsonl
+      --import: merges $HISTFILE into ~/.shtory.*.jsonl
   uninstall
           remove them again
   help    this text
@@ -33,7 +33,7 @@ subcommands:
           print (or set) the hostname shtory uses
   sync [--compact <n>] [--self] [<hostname>...]
 	  sync histories with host(s) over ssh
-	  (default: detect host(s) from ~/.bash_history.*.jsonl filenames)
+	  (default: detect host(s) from ~/.shtory.*.jsonl filenames)
       --self: also overwrite each host's own history file with the local synced copy
       --compact <n>: while syncing, run compact (implies --self)
   stats [--timeline] [--cmd <n>] [--dir <n>]
@@ -69,8 +69,8 @@ hook_block() {
 
 # >>> shtory >>>
 __shtory_log() {
-  local ec=${__bp_last_ret_value-$?} h1 cmd esc d re f n
-  f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  local ec=${__bp_last_ret_value:-$?} h1 cmd esc d re f n
+  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
@@ -134,8 +134,8 @@ if [[ $- == *i* ]]; then
     fi
     sub=${COMP_WORDS[1]} prev=${COMP_WORDS[COMP_CWORD-1]} cur=${COMP_WORDS[COMP_CWORD]}
     local -a hs=() f h
-    for f in "$HOME"/.bash_history.*.jsonl; do
-      h=${f##*/.bash_history.}; hs+=("${h%.jsonl}")
+    for f in "$HOME"/.shtory.*.jsonl; do
+      h=${f##*/.shtory.}; hs+=("${h%.jsonl}")
     done
     case $sub in
       '')
@@ -180,9 +180,9 @@ fi
 EOF
 }
 
-remove_block() { # $1 = rc path; rewrite in place, preserving permissions
-  local rc=$1 tmp
-  tmp=$(mktemp "${rc}.XXXXXX") # same dir as $rc so mv is atomic
+remove_block() { # $1 = rcfile (rewrite in place, preserving permissions)
+  local rcfile=$1 tmp
+  tmp=$(mktemp "${rcfile}.XXXXXX") # same dir as $rcfile so mv is atomic
   awk -v s="$MARK_START" -v e="$MARK_END" '
     BEGIN { have = 0; skip = 0 }
     skip { if ($0 == e) skip = 0; next }
@@ -212,13 +212,13 @@ drop_stale() {
     | map(if .t == 0 and $live[.c] then empty else . end) | .[]'
 }
 
-# import from `sort -u ~/.bash_history | grep -v "^#"` with {t:0, d:"", e:0}
+# import from `sort -u $HISTFILE | grep -v "^#"` with {t:0, d:"", e:0}
 # (used by install --import)
 import_history() {
   # tmp/tmp2/out: global (EXIT trap on signal exit has no locals)
-  local src="$HOME/.bash_history" f n
+  local src="${HISTFILE:-$HOME/.bash_history}" f n
   tmp='' tmp2=''
-  f="$HOME/.bash_history.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
   trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
@@ -299,14 +299,14 @@ cmd_uninstall() {
 
 # --- search -----------------------------------------------------------------
 
-host_of() { local f=$1; f=${f##*/.bash_history.}; printf '%s' "${f%.jsonl}"; }
+host_of() { local f=$1; f=${f##*/.shtory.}; printf '%s' "${f%.jsonl}"; }
 
 # shellcheck disable=SC2016 # $home for jq
 TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startswith($home + "/") then "~" + .[($home | length):] else . end;'
 
 # shellcheck disable=SC2016 # $vars for jq
 JQ_PROG='
-# host from the filename .bash_history.<host>.jsonl;
+# host from the filename .shtory.<host>.jsonl;
 # avoid (possibly jq version unsupported) named captures in sub templates
 # $plain=1: query is a plain substring (no regex metachars) -> contains (C-speed memmem, ~4x quicker)
 ($q | ascii_downcase) as $ql
@@ -314,7 +314,7 @@ JQ_PROG='
     . , inputs
     | fromjson? | select(. != null)
     | .H = (if $mode == "cmd" then ""
-            elif $H == "" then (input_filename | sub("^.*\\.bash_history\\."; "") | sub("\\.jsonl$"; ""))
+            elif $H == "" then (input_filename | sub("^.*\\.shtory\\."; "") | sub("\\.jsonl$"; ""))
             else $H end)
     | select(
       # ascii_downcase: test(...;"i") miscompiles in some jq versions
@@ -431,7 +431,7 @@ cmd_search() {
   q=${query_words[*]-}
 
   shopt -s nullglob
-  for f in "$HOME"/.bash_history.*.jsonl; do
+  for f in "$HOME"/.shtory.*.jsonl; do
     h=$(host_of "$f")
     # shellcheck disable=SC2053 # $host glob pattern intended
     [[ $h == $host ]] && files+=("$f")
@@ -519,16 +519,16 @@ sync_pull() {
   mkdir -p "$dest"
   # seed with local copies so rsync's quick check skips files the remote hasn't changed
   shopt -s nullglob
-  for f in "$HOME"/.bash_history.*.jsonl; do
+  for f in "$HOME"/.shtory.*.jsonl; do
     cp -p -- "$f" "$dest/"
   done
   shopt -u nullglob
-  rsync -zaPu "$h:~/.bash_history.*.jsonl" "$dest/" || rc=$?
+  rsync -zaPu "$h:~/.shtory.*.jsonl" "$dest/" || rc=$?
   if (( rc == 0 )); then
     return 0
   fi
   # 23/24/30: partial transfer; merge what arrived and warn
-  if (( rc == 23 || rc == 24 || rc == 30 )) && compgen -G "$dest/.bash_history.*.jsonl" >/dev/null; then
+  if (( rc == 23 || rc == 24 || rc == 30 )) && compgen -G "$dest/.shtory.*.jsonl" >/dev/null; then
     echo "shtory: $h: pull incomplete (rsync $rc) - merged what arrived" >&2
     return 0
   fi
@@ -569,7 +569,7 @@ sync_merge() {
   local root=$1 f base tmp
   local -a files=() parts=()
   shopt -s nullglob
-  for f in "$root"/*/.bash_history.*.jsonl; do
+  for f in "$root"/*/.shtory.*.jsonl; do
     files+=("$f")
   done
   shopt -u nullglob
@@ -597,9 +597,9 @@ sync_push() {
   local h=$1 name=$2 self=$3 f base
   local -a push=()
   shopt -s nullglob
-  for f in "$HOME"/.bash_history.*.jsonl; do
+  for f in "$HOME"/.shtory.*.jsonl; do
     base=${f##*/}
-    if [[ $base == ".bash_history.$name.jsonl" && $self -ne 1 ]]; then
+    if [[ $base == ".shtory.$name.jsonl" && $self -ne 1 ]]; then
       continue
     fi
     push+=("$f")
@@ -629,7 +629,7 @@ cmd_sync() {
   if [[ ${#hosts[@]} -eq 0 ]]; then
     local localhost=${SHTORY_HOSTNAME:-$HOSTNAME}
     shopt -s nullglob
-    for f in "$HOME"/.bash_history.*.jsonl; do
+    for f in "$HOME"/.shtory.*.jsonl; do
       h=$(host_of "$f")
       [[ $h == "$localhost" ]] && continue # skip self
       hosts+=("$h")
@@ -670,7 +670,7 @@ cmd_sync() {
   sync_merge "$tmpdir"
   if [[ -n $cap ]]; then
     shopt -s nullglob
-    for f in "$HOME"/.bash_history.*.jsonl; do
+    for f in "$HOME"/.shtory.*.jsonl; do
       compact_file "$f" "$cap"
     done
     shopt -u nullglob
@@ -847,7 +847,7 @@ cmd_stats() {
     return 2
   fi
   shopt -s nullglob
-  for f in "$HOME"/.bash_history.*.jsonl; do
+  for f in "$HOME"/.shtory.*.jsonl; do
     files+=("$f")
   done
   shopt -u nullglob
@@ -908,7 +908,7 @@ cmd_compact() {
     return 2
   fi
   shopt -s nullglob
-  for f in "$HOME"/.bash_history.*.jsonl; do
+  for f in "$HOME"/.shtory.*.jsonl; do
     compact_file "$f" "$n"
   done
   shopt -u nullglob

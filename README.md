@@ -2,25 +2,29 @@
 
 [![CI](https://github.com/casperdcl/shtory/actions/workflows/ci.yml/badge.svg)](https://github.com/casperdcl/shtory/actions/workflows/ci.yml)
 
-Bash history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): shell scripts using just [coreutils](https://en.wikipedia.org/wiki/GNU_Core_Utilities)/[`jq`](https://github.com/jqlang/jq)/[`fzf`](https://github.com/junegunn/fzf).
+Shell history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): a script using just [coreutils](https://en.wikipedia.org/wiki/GNU_Core_Utilities)/[`jq`](https://github.com/jqlang/jq)/[`fzf`](https://github.com/junegunn/fzf).
 
-- logs every command (including path, time & exit code) to `~/.bash_history.$HOSTNAME.jsonl`
+- logs every command (including path, time & exit code) to `~/.shtory.$HOSTNAME.jsonl`
 - interactive search
 - serverless efficient merge/sync via `rsync`/`ssh`
 
 ## Subcommands
 
-### install / update
+### install/update
 
 Place on `$PATH` and install:
 
 ```bash
-echo 'export SHTORY_HOSTNAME=$HOSTNAME' >> ~/.bashrc; . ~/.bashrc # optional
+# optional: set persistent hostname
+export SHTORY_HOSTNAME=$HOSTNAME
+echo "export SHTORY_HOSTNAME=$SHTORY_HOSTNAME" >> ~/.bashrc
+
+# install shtory (and optional tui-shtory fallback if fzf unavailable)
 curl -fsSLO --output-dir ~/.local/bin/ https://raw.githubusercontent.com/casperdcl/shtory/main/{tui-,}shtory
 shtory install --import
 ```
 
-- `--import`: also include existing `~/.bash_history` (with no path/time/exit code info)
+- `--import`: also include existing `$HISTFILE` (with no path/time/exit code info)
 
 A `shtory` block is upserted in `~/.bashrc` (hook, keybinding & tab completion).
 
@@ -28,7 +32,7 @@ A `shtory` block is upserted in `~/.bashrc` (hook, keybinding & tab completion).
 > To skip logging any commands matching a regex, use `SHTORY_SKIP`; e.g. add to `~/.bashrc`:
 >
 > ```bash
-> export SHTORY_SKIP='(KEY|TOKEN).*=.+'
+> SHTORY_SKIP='(KEY|TOKEN).*=.+'
 > ```
 
 ### search
@@ -56,7 +60,7 @@ shtory search [options] [<query>...]
 > <kbd>Ctrl</kbd><kbd>r</kbd> is the default interactive trigger (overriding the normal `history` trigger); equivalent config in `~/.bashrc`:
 >
 > ```bash
-> export SHTORY_KEY='\C-r'
+> SHTORY_KEY='\C-r'
 > ```
 
 ### hostname
@@ -84,7 +88,7 @@ Pulls every remote host, merges differences, then pushes.
 
 `remote host`:
 
-- when unspecified, auto-detect remote host(s) via `~/.bash_history.*.jsonl` names
+- when unspecified, auto-detect remote host(s) via `~/.shtory.*.jsonl` names
 - a corresponding hostname should exist in `~/.ssh/config`
   - :warning: this should match the remote host's own `shtory hostname`, otherwise auto-detection won't work correctly
 
@@ -113,12 +117,18 @@ shtory compact <n>
 
 ## Configuration
 
-env var | effect
+env | effect
 -- | --
-`SHTORY_TUI=1` | force builtin picker instead of `fzf`
-`SHTORY_SAFE=1` | merge via `jq` instead of coreutils (~50x slower but full JSON-compat)
-`SHTORY_NOPROGRESS=1` | disable `tqdm` progress
+`HISTCONTROL`, `HISTIGNORE` | see `man bash`
+`HISTFILE` | [`install --import`](#installupdate) source
+-- | --
 `SHTORY_BASHRC` | (un)install target (default `~/.bashrc`)
+`SHTORY_GIST_ID`, `SHTORY_GIST_FILE` | `stats --timeline` gist target; see `stats`
+`SHTORY_HOSTNAME` | per-host history filename; see [`hostname`](#hostname)
+`SHTORY_KEY` | search keybinding (default <kbd>Ctrl</kbd><kbd>r</kbd>); see [`search`](#search)
+`SHTORY_NOPROGRESS=1` | disable `tqdm` progress
+`SHTORY_SAFE=1` | merge via `jq` instead of coreutils (~50x slower but full JSON-compat)
+`SHTORY_SKIP` | regex of commands not to log; see [`install/update`](#installupdate)
 
 ## Alternatives
 
