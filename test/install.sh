@@ -13,6 +13,8 @@ BS=$(command -v bash)
 echo 'echo kept' > "$RC"
 SHELL=$BS SHTORY_BASHRC=$RC "$B" install >/dev/null
 SHELL=$BS SHTORY_BASHRC=$RC "$B" install >/dev/null
+SHELL=$BS SHTORY_BASHRC=$RC "$B" install foo >/dev/null 2>&1
+assert_rc "install: unknown arg rc 2 (no hang)" 2 $?
 assert_eq "idempotent install" "1" "$(grep -cF '>>> shtory >>>' "$RC")"
 assert_eq "re-install doesn't stack blank lines" "1" "$(sed -n '1,/>>> shtory >>>/p' "$RC" | grep -c '^$')"
 assert_eq "preserves first line" "echo kept" "$(head -1 "$RC")"
