@@ -15,14 +15,16 @@ Shell history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): a s
 Place on `$PATH` and install:
 
 ```sh
-# optional: set persistent hostname
-export SHTORY_HOSTNAME=$HOSTNAME
-echo "export SHTORY_HOSTNAME=$SHTORY_HOSTNAME" | tee -a ~/.bashrc ~/.zshrc
-
-# install shtory (and optional tui-shtory fallback if fzf unavailable)
+# place on path (shtory & optional tui-shtory fallback if fzf unavailable)
 curl -fsSLO --output-dir ~/.local/bin/ https://raw.githubusercontent.com/casperdcl/shtory/main/{tui-,}shtory
+# optional: set a persistent hostname for logging & sync self-report
+shtory hostname <NAME>
+# add shell hooks to rcfile
 shtory install --import
 ```
+
+> [!NOTE]
+> `shtory hostname <NAME>` is only required if `${HOSTNAME:-$HOST}` does not match the `ssh <NAME>` alias used to connect to the machine.
 
 - `--import`: also include existing `$HISTFILE` (with no path/time/exit code info)
 
@@ -65,13 +67,13 @@ shtory search [options] [<query>...]
 
 ### hostname
 
-Print or override the hostname used by `shtory` locally (`export SHTORY_HOSTNAME` in `~/.bashrc` or `~/.zshrc`).
+Print or override hostname used by `shtory` locally (`SHTORY_HOSTNAME` in `~/.shtory/shtory.env`).
 
 ```sh
 shtory hostname [<host>]
 ```
 
-`${SHTORY_HOSTNAME:-$HOSTNAME}` (bash)/`${SHTORY_HOSTNAME:-$HOST}` (zsh) determines which history JSONL file is written and searched.
+Resolution order: `$SHTORY_HOSTNAME` > `~/.shtory/shtory.env` > `$HOSTNAME` (bash)/`$HOST` (zsh) determines shtory history JSONL file to use.
 
 ### sync
 
@@ -125,7 +127,7 @@ env | effect
 -- | --
 `SHTORY_BASHRC` | (un)install target (default `~/.bashrc`)
 `SHTORY_GIST_ID`, `SHTORY_GIST_FILE` | `stats --timeline` gist target; see `stats`
-`SHTORY_HOSTNAME` | per-host history filename; see [`hostname`](#hostname)
+`SHTORY_HOSTNAME` | per-host history filename override; see [`hostname`](#hostname)
 `SHTORY_KEY` | search keybinding (default <kbd>Ctrl</kbd><kbd>r</kbd>); see [`search`](#search)
 `SHTORY_NOPROGRESS=1` | disable `tqdm` progress
 `SHTORY_SAFE=1` | merge via `jq` instead of coreutils (~50x slower but full JSON-compat)

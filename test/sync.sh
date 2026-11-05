@@ -18,22 +18,20 @@ if [[ ${1:-} == -G ]]; then
 fi
 h=$1
 a=(); a+=("$@")
+cmd=''
 for (( i = 0; i < ${#a[@]}; i++ )); do
   case ${a[i]} in
     -o) (( i++ )); continue ;; # skip -o and its value
     -*) continue ;;
-    *) h=${a[i]}; break ;;
+    *) h=${a[i]}; cmd=${a[i+1]}; break ;;
   esac
 done
 if [[ -n ${FAKE_DOWN:-} ]] && grep -qx "$h" "$FAKE_DOWN"; then
   exit 255
 fi
-if [[ -n ${FAKE_HOSTNAMES:-} ]] && grep -q "^$h " "$FAKE_HOSTNAMES"; then
-  awk -v h="$h" '$1 == h {print $2}' "$FAKE_HOSTNAMES"
-  exit 0
-fi
-printf '%s\n' "$h"
-exit 0
+# run the remote command in the fake remote's $HOME (its .shtory/shtory.env is visible)
+[[ -d $FAKE_REMOTE/$h ]] && home=$FAKE_REMOTE/$h || home=$FAKE_REMOTE
+env -i PATH="$PATH" HOME="$home" HOSTNAME="$h" bash -c "$cmd"
 EOF
 cat > "$SHIM/rsync" <<'EOF'
 #!/usr/bin/env bash
@@ -211,9 +209,10 @@ printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c"
 touch -d '2020-01-01' "$R5/alx/.shtory.realhost.jsonl"   # same size, different content: force mtime mismatch
 printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L5/.shtory.other2.jsonl"
 printf 'alx\n' > "$T/ssh_hosts6"
-printf 'alx realhost\n' > "$T/hostnames"
+mkdir -p "$R5/alx/.shtory"
+printf 'SHTORY_HOSTNAME=realhost\n' > "$R5/alx/.shtory/shtory.env"
 (
-  HOME=$L5 FAKE_REMOTE=$R5 FAKE_SSH_HOSTS=$T/ssh_hosts6 FAKE_HOSTNAMES=$T/hostnames PATH="$SHIM:$PATH" \
+  HOME=$L5 FAKE_REMOTE=$R5 FAKE_SSH_HOSTS=$T/ssh_hosts6 PATH="$SHIM:$PATH" \
   "$B" sync alx
 ) >/dev/null 2>&1
 assert_eq "name mismatch: own file (by reported name) not pushed" $'{"t":10,"d":"/x","e":0,"c":"shared"}\n{"t":20,"d":"/x","e":0,"c":"remote-only"}' \

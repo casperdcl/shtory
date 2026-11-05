@@ -48,7 +48,7 @@ subcommands:
 
 search options:
   -h, --hostname <name>   pattern, default: '*' (all hosts)
-  -H, --localhost         same as -h="${SHTORY_HOSTNAME:-$HOSTNAME}"
+  -H, --localhost         same as -h="$SHTORY_HOSTNAME"
   -c, --cwd               only commands run in $PWD
   -s, --sort <order>      frecency (default)/newest/oldest/count
   -n, --limit <n>         max results, default 0 (unlimited)
@@ -72,7 +72,11 @@ hook_block_bash() {
 # >>> shtory >>>
 __shtory_log() {
   local ec=${__bp_last_ret_value:-$?} h1 cmd esc d re f n
-  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  # hostname: $SHTORY_HOSTNAME > ~/.shtory/shtory.env > $HOSTNAME; cached per shell
+  if [[ -z ${SHTORY_HOSTNAME-} && -z ${__shtory_host-} && -f $HOME/.shtory/shtory.env ]]; then
+    __shtory_host=$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+  fi
+  f="$HOME/.shtory.${SHTORY_HOSTNAME:-${__shtory_host:-$HOSTNAME}}.jsonl"
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
@@ -227,7 +231,11 @@ __shtory_log() {
   esc=${esc//[[:cntrl:]]/}
   d=${PWD//\\/\\\\}
   d=${d//\"/\\\"}
-  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOST}.jsonl"
+  # hostname: $SHTORY_HOSTNAME > ~/.shtory/shtory.env > $HOST; cached per shell
+  if [[ -z ${SHTORY_HOSTNAME-} && -z ${__shtory_host-} && -f $HOME/.shtory/shtory.env ]]; then
+    __shtory_host=$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
+  fi
+  f="$HOME/.shtory.${SHTORY_HOSTNAME:-${__shtory_host:-$HOST}}.jsonl"
   t=${EPOCHSECONDS:-$(date +%s)}
   # creation mode 0600
   [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
@@ -301,15 +309,6 @@ remove_block() { # $1 = rcfile (rewrite in place, preserving permissions)
   mv -f "$tmp" "$rcfile"
 }
 
-# rewrite $1 in place (preserving permissions), dropping lines matching $2
-strip_line() {
-  local rcfile=$1 pat=$2 tmp
-  tmp=$(mktemp "${rcfile}.XXXXXX")
-  grep -vF "$pat" "$rcfile" > "$tmp" || true
-  chmod --reference="$rcfile" "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$rcfile"
-}
-
 # drop t:0 (imported) commands which exist (t:!=0)
 drop_stale() {
   jq -c -s '(map(select(.t != 0) | .c) | reduce .[] as $x ({}; .[$x] = true)) as $live
@@ -327,7 +326,7 @@ import_history() {
     src="${HISTFILE:-$HOME/.bash_history}"
   fi
   tmp='' tmp2=''
-  f="$HOME/.shtory.${SHTORY_HOSTNAME:-$HOSTNAME}.jsonl"
+  f="$HOME/.shtory.$SHTORY_HOSTNAME.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
   tmp=$(mktemp)
   trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
@@ -528,7 +527,7 @@ cmd_search() {
   while [[ $# -gt 0 ]]; do
     case $1 in
       -h|--hostname) host=${2:?}; shift 2 ;;
-      -H|--localhost) host=${SHTORY_HOSTNAME:-$HOSTNAME}; shift ;;
+      -H|--localhost) host=$SHTORY_HOSTNAME; shift ;;
       -c|--cwd) cwd=$PWD; shift ;;
       -s|--sort) order=${2:?}; shift 2 ;;
       -n|--limit) limit=${2:?}; shift 2 ;;
@@ -603,27 +602,21 @@ cmd_search() {
 
 cmd_hostname() {
   if [[ $# -eq 0 ]]; then
-    echo "${SHTORY_HOSTNAME:-$HOSTNAME}"
+    echo "$SHTORY_HOSTNAME"
     return 0
   fi
   if [[ $# -gt 1 ]]; then
     echo "shtory: usage: shtory hostname [<host>]" >&2
     return 2
   fi
-  local name=$1 rcfile line
+  local name=$1
   if [[ ! $name =~ ^[A-Za-z0-9._-]+$ ]]; then
     echo "shtory: invalid hostname: $name" >&2
     return 2
   fi
-  if [[ ${SHELL##*/} == zsh ]]; then
-    rcfile=$(zshrc)
-  else
-    rcfile=$(bashrc)
-  fi
-  line="export SHTORY_HOSTNAME=$name"
-  strip_line "$rcfile" 'SHTORY_HOSTNAME='
-  printf '%s\n' "$line" >> "$rcfile"
-  echo "shtory: $line written to $rcfile"
+  mkdir -p "$HOME/.shtory"
+  printf 'SHTORY_HOSTNAME=%s\n' "$name" > "$HOME/.shtory/shtory.env"
+  echo "shtory: SHTORY_HOSTNAME=$name written to $HOME/.shtory/shtory.env"
 }
 
 # --- sync -------------------------------------------------------------------
@@ -749,7 +742,7 @@ cmd_sync() {
   fi
   [[ -n $cap ]] && self=1 # --compact implies --self
   if [[ ${#hosts[@]} -eq 0 ]]; then
-    local localhost=${SHTORY_HOSTNAME:-$HOSTNAME}
+    local localhost=$SHTORY_HOSTNAME
     shopt -s nullglob
     for f in "$HOME"/.shtory.*.jsonl; do
       h=$(host_of "$f")
@@ -777,7 +770,7 @@ cmd_sync() {
     printf 'shtory: %s: syncing\n' "$h" >&2
     rc=0
     name=$(ssh -o ConnectTimeout=10 "$h" \
-      "bash -c 'printf %s \${SHTORY_HOSTNAME:-\$HOSTNAME}'" 2>/dev/null) || rc=$?
+      "bash -c 'h=\$(grep ^SHTORY_HOSTNAME= \"\$HOME/.shtory/shtory.env\" 2>/dev/null | tail -n1 | cut -d= -f2-); printf %s \"\${SHTORY_HOSTNAME:-\${h:-\$HOSTNAME}}\"'" 2>/dev/null) || rc=$?
     if (( rc == 255 )); then
       echo "shtory: $h: unreachable (skipped)" >&2
       continue
@@ -1053,5 +1046,9 @@ main() {
     *) usage >&2; return 2 ;;
   esac
 }
+
+# hostname: $SHTORY_HOSTNAME > ~/.shtory/shtory.env > $HOSTNAME
+SHTORY_HOSTNAME=${SHTORY_HOSTNAME:-$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2- || true)}
+SHTORY_HOSTNAME=${SHTORY_HOSTNAME:-$HOSTNAME}
 
 main "$@"

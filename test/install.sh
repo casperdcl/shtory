@@ -20,8 +20,6 @@ assert_eq "re-install doesn't stack blank lines" "1" "$(sed -n '1,/>>> shtory >>
 assert_eq "preserves first line" "echo kept" "$(head -1 "$RC")"
 grep -qF 'complete -F _shtory shtory' "$RC" && ok "completion registered" || bad "completion registered"
 grep -qF '__shtory_log' "$RC" && ok "hook present" || bad "hook present"
-SHELL=$BS SHTORY_BASHRC=$RC "$B" hostname my.host >/dev/null
-grep -qF 'export SHTORY_HOSTNAME=my.host' "$RC" && ok "hostname written" || bad "hostname written"
 SHELL=$BS SHTORY_BASHRC=$RC "$B" uninstall >/dev/null
 assert_eq "uninstall removes block" "0" "$(grep -cF 'shtory' "$RC" || true)"
 assert_eq "uninstall preserves rest" "echo kept" "$(head -1 "$RC")"
@@ -41,8 +39,6 @@ SHELL=/usr/bin/zsh SHTORY_ZSHRC=$TZ2 "$B" install >/dev/null
 grep -qF 'add-zsh-hook zshaddhistory' "$TZ2" && ok "install auto-detects zsh from \$SHELL" || bad "install auto-detects zsh from \$SHELL"
 SHELL=/usr/bin/zsh SHTORY_ZSHRC=$TZ "$B" uninstall >/dev/null
 assert_eq "zsh: uninstall removes block" "0" "$(grep -cF 'shtory' "$TZ" || true)"
-SHELL=/usr/bin/zsh SHTORY_ZSHRC=$TZ "$B" hostname zsh.host >/dev/null
-grep -qF 'export SHTORY_HOSTNAME=zsh.host' "$TZ" && ok "zsh: hostname written to zshrc" || bad "zsh: hostname written to zshrc"
 
 if command -v zsh >/dev/null 2>&1; then
 echo "# zsh hook logging"
@@ -116,3 +112,12 @@ printf 'fresh cmd\n' > "$T/hook2.sh"
 F2=$H2/.shtory.testhost2.jsonl
 [[ -f $F2 && $(wc -l < "$F2") == 1 ]] && ok "re-read entry not re-logged" || bad "re-read entry not re-logged ($(jq -r .c "$F2" 2>/dev/null | tr '\n' '|'))"
 assert_eq "re-read entry: fresh cmd logged" "fresh cmd" "$(jq -r .c "$F2" 2>/dev/null)"
+
+# hostname resolved from ~/.shtory/shtory.env (no SHTORY_HOSTNAME env var)
+H3=$T/hook_home3; mkdir -p "$H3/.shtory"
+SHTORY_BASHRC=$H3/.bashrc "$B" install >/dev/null
+printf 'SHTORY_HOSTNAME=filehost\n' > "$H3/.shtory/shtory.env"
+printf 'envfile cmd\n' > "$T/hook3.sh"
+( HOME=$H3 TERM=dumb bash -i < "$T/hook3.sh" >/dev/null 2>&1 )
+F3=$H3/.shtory.filehost.jsonl
+[[ -f $F3 && $(wc -l < "$F3") == 1 ]] && ok "env file host used by hook" || bad "env file host used by hook ($(jq -r .c "$F3" 2>/dev/null | tr '\n' '|'))"
