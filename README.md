@@ -4,7 +4,7 @@
 
 Shell history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): a script using just [coreutils](https://en.wikipedia.org/wiki/GNU_Core_Utilities)/[`jq`](https://github.com/jqlang/jq)/[`fzf`](https://github.com/junegunn/fzf).
 
-- logs every command (including path, time & exit code) to `~/.shtory.$HOSTNAME.jsonl`
+- logs every command (including path, time & exit code) to `~/.shtory/$HOSTNAME.jsonl`
 - interactive search
 - serverless efficient merge/sync via `rsync`/`ssh`
 
@@ -90,7 +90,7 @@ Pulls every remote host, merges differences, then pushes.
 
 `remote host`:
 
-- when unspecified, auto-detect remote host(s) via `~/.shtory.*.jsonl` names
+- when unspecified, auto-detect remote host(s) via `~/.shtory/*.jsonl` names
 - a corresponding hostname should exist in `~/.ssh/config`
   - :warning: this should match the remote host's own `shtory hostname`, otherwise auto-detection won't work correctly
 

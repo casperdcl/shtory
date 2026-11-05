@@ -14,12 +14,12 @@ else
       | grep -v '^[[:space:]]*$' | tail -1
   }
   NP=$T/nopath; mkdir -p "$NP" # pty PATH: no fzf/tui-shtory -> numbered loop
-  for b in bash sh jq cat stty; do
+  for b in bash sh jq cat stty mkdir; do
     p=$(command -v "$b") && ln -sf "$p" "$NP/$b"
   done
-  PTH=$T/pty_home; mkdir -p "$PTH"
+  PTH=$T/pty_home; mkdir -p "$PTH/.shtory"
   printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"git status"}' '{"t":2,"d":"/x","e":0,"c":"git push"}' \
-    > "$PTH/.shtory.pty.jsonl"
+    > "$PTH/.shtory/pty.jsonl"
 
   # numbered loop: type a pattern, select row 1 (newest match)
   out=$(printf 'git\n1\n' | SHELL=$NP/bash PATH=$NP HOME=$PTH \
@@ -29,13 +29,13 @@ else
   # fzf exits 0 with no output on Enter over an empty list (its contract):
   # cmd_search must treat that as cancel, not as an empty selection
   # (an empty selection wipes the caller's current line via READLINE_LINE='')
-  FZH=$T/fz_home; FNP=$T/fzpath; mkdir -p "$FZH" "$FNP"
+  FZH=$T/fz_home; FNP=$T/fzpath; mkdir -p "$FZH/.shtory" "$FNP"
   for b in bash sh jq cat stty awk sleep; do
     p=$(command -v "$b") && ln -sf "$p" "$FNP/$b"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 1; exit 0' > "$FNP/fzf" # fzf: enter on empty list
   chmod +x "$FNP/fzf"
-  : > "$FZH/.shtory.fz.jsonl"
+  : > "$FZH/.shtory/fz.jsonl"
   { sleep 0.5; printf '\r'; sleep 2; } \
     | SHELL=$FNP/bash PATH="$FNP" HOME=$FZH \
     "$SC" -qec "$B search" /dev/null > "$T/fz_out" 2>/dev/null
@@ -78,13 +78,13 @@ EOF
   # zsh: ctrl-r zle widget opens the numbered loop (keys via /dev/tty)
   # and inserts the selection; TERM=linux because Termux has no xterm terminfo
   if command -v zsh >/dev/null 2>&1; then
-    ZP=$T/zpty_home; mkdir -p "$ZP/bin"
-    for b in bash sh jq cat stty; do
+    ZP=$T/zpty_home; mkdir -p "$ZP/bin" "$ZP/.shtory"
+    for b in bash sh jq cat stty mkdir; do
       p=$(command -v "$b") && ln -sf "$p" "$ZP/bin/$b"
     done
     ln -sf "$PWD/shtory" "$ZP/bin/shtory"
     printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"echo zsel one"}' '{"t":2,"d":"/x","e":0,"c":"echo zsel two"}' \
-      > "$ZP/.shtory.zpty.jsonl"
+      > "$ZP/.shtory/zpty.jsonl"
     SHELL=/usr/bin/zsh SHTORY_ZSHRC=$ZP/.zshrc "$B" install >/dev/null
     out=$( { sleep 0.5; printf '\x12'; sleep 1.5; printf 'echo\n'; sleep 1.5; printf '1\n'; sleep 1.5; printf '\r'; sleep 1.5; printf 'exit\n'; sleep 0.5; } \
       | HOME=$ZP PATH="$ZP/bin" TERM=linux \
@@ -99,12 +99,12 @@ EOF
   SHTORY_BASHRC=$HC/.bashrc HOME=$HC "$B" install >/dev/null
   hc_run() { # $1 = HISTCONTROL value, rest = commands; prints saved commands
     local hc=$1 line; shift
-    rm -f "$HC/.bash_history" "$HC"/.shtory.*.jsonl
+    rm -f "$HC/.bash_history" "$HC"/.shtory/*.jsonl
     printf 'HISTCONTROL=%s\n' "$hc" >> "$HC/.bashrc"
     { for line in "$@"; do sleep 0.25; printf '%s\n' "$line"; done
       sleep 0.25; printf 'exit\n'; sleep 0.5; } \
       | SHELL=$NP/bash PATH=$NP HOME=$HC "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
-    jq -r .c "$HC"/.shtory.*.jsonl 2>/dev/null
+    jq -r .c "$HC"/.shtory/*.jsonl 2>/dev/null
   }
   assert_eq "HISTCONTROL unset saves all" $'echo a\necho a\necho b' "$(hc_run '' 'echo a' 'echo a' 'echo b')"
   assert_eq "HISTCONTROL=ignoredups" $'echo a\necho b' "$(hc_run ignoredups 'echo a' 'echo a' 'echo b')"
@@ -119,5 +119,5 @@ EOF
     sleep 0.25; printf 'exit\n'; sleep 0.5; } \
     | SHELL=$NP/bash PATH=$NP HOME=$HC2 "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
   assert_eq "history -c: logging continues after clear" $'echo a\necho b\necho c\necho d' \
-    "$(jq -r .c "$HC2"/.shtory.*.jsonl 2>/dev/null)"
+    "$(jq -r .c "$HC2"/.shtory/*.jsonl 2>/dev/null)"
 fi

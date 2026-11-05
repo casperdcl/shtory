@@ -24,7 +24,7 @@ subcommands:
   install [--import]
           add hook & search keybinding
           (bash: ~/.bashrc, zsh: ~/.zshrc)
-      --import: merges $HISTFILE into ~/.shtory.*.jsonl
+      --import: merges $HISTFILE into ~/.shtory/*.jsonl
   uninstall
           remove them again
   help    this text
@@ -34,7 +34,7 @@ subcommands:
           print (or set) the hostname shtory uses
   sync [--compact <n>] [--self] [<hostname>...]
 	  sync histories with host(s) over ssh
-	  (default: detect host(s) from ~/.shtory.*.jsonl filenames)
+	  (default: detect host(s) from ~/.shtory/*.jsonl filenames)
       --self: also overwrite each host's own history file with the local synced copy
       --compact <n>: while syncing, run compact (implies --self)
   stats [--timeline] [--cmd <n>] [--dir <n>]
@@ -76,7 +76,7 @@ __shtory_log() {
   if [[ -z ${SHTORY_HOSTNAME-} && -z ${__shtory_host-} && -f $HOME/.shtory/shtory.env ]]; then
     __shtory_host=$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
   fi
-  f="$HOME/.shtory.${SHTORY_HOSTNAME:-${__shtory_host:-$HOSTNAME}}.jsonl"
+  f="$HOME/.shtory/${SHTORY_HOSTNAME:-${__shtory_host:-$HOSTNAME}}.jsonl"
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
@@ -110,8 +110,8 @@ __shtory_log() {
   esc=${esc//[[:cntrl:]]/}
   d=${PWD//\\/\\\\}
   d=${d//\"/\\\"}
-  # creation mode 0600
-  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
+  # creation: dir 0700, file 0600
+  [[ -f $f ]] || { (umask 077; mkdir -p "$HOME/.shtory" 2>/dev/null; : >> "$f") 2>/dev/null || true; }
   printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
@@ -142,8 +142,8 @@ if [[ $- == *i* ]]; then
     fi
     sub=${COMP_WORDS[1]} prev=${COMP_WORDS[COMP_CWORD-1]} cur=${COMP_WORDS[COMP_CWORD]}
     local -a hs=() f h
-    for f in "$HOME"/.shtory.*.jsonl; do
-      h=${f##*/.shtory.}; hs+=("${h%.jsonl}")
+    for f in "$HOME"/.shtory/*.jsonl; do
+      h=${f##*/}; hs+=("${h%.jsonl}")
     done
     case $sub in
       '')
@@ -235,10 +235,10 @@ __shtory_log() {
   if [[ -z ${SHTORY_HOSTNAME-} && -z ${__shtory_host-} && -f $HOME/.shtory/shtory.env ]]; then
     __shtory_host=$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
   fi
-  f="$HOME/.shtory.${SHTORY_HOSTNAME:-${__shtory_host:-$HOST}}.jsonl"
+  f="$HOME/.shtory/${SHTORY_HOSTNAME:-${__shtory_host:-$HOST}}.jsonl"
   t=${EPOCHSECONDS:-$(date +%s)}
-  # creation mode 0600
-  [[ -f $f ]] || { (umask 077; : >> "$f") 2>/dev/null || true; }
+  # creation: dir 0700, file 0600
+  [[ -f $f ]] || { (umask 077; mkdir -p "$HOME/.shtory" 2>/dev/null; : >> "$f") 2>/dev/null || true; }
   printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "$t" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
@@ -268,8 +268,8 @@ if (( ${+functions[compdef]} )); then
       return
     fi
     sub=${words[2]}
-    for f in "$HOME"/.shtory.*.jsonl(N); do
-      h=${f##*/.shtory.}
+    for f in "$HOME"/.shtory/*.jsonl(N); do
+      h=${f##*/}
       hs+=("${h%.jsonl}")
     done
     case $sub in
@@ -326,8 +326,9 @@ import_history() {
     src="${HISTFILE:-$HOME/.bash_history}"
   fi
   tmp='' tmp2=''
-  f="$HOME/.shtory.$SHTORY_HOSTNAME.jsonl"
+  f="$HOME/.shtory/$SHTORY_HOSTNAME.jsonl"
   [[ -r $src ]] || { echo "shtory: no $src to import"; return 0; }
+  (umask 077; mkdir -p "$HOME/.shtory")
   tmp=$(mktemp)
   trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
@@ -413,14 +414,14 @@ cmd_uninstall() {
 
 # --- search -----------------------------------------------------------------
 
-host_of() { local f=$1; f=${f##*/.shtory.}; printf '%s' "${f%.jsonl}"; }
+host_of() { local f=$1; f=${f##*/}; printf '%s' "${f%.jsonl}"; }
 
 # shellcheck disable=SC2016 # $home for jq
 TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startswith($home + "/") then "~" + .[($home | length):] else . end;'
 
 # shellcheck disable=SC2016 # $vars for jq
 JQ_PROG='
-# host from the filename .shtory.<host>.jsonl;
+# host from the filename .shtory/<host>.jsonl;
 # avoid (possibly jq version unsupported) named captures in sub templates
 # $plain=1: query is a plain substring (no regex metachars) -> contains (C-speed memmem, ~4x quicker)
 ($q | ascii_downcase) as $ql
@@ -428,7 +429,7 @@ JQ_PROG='
     . , inputs
     | fromjson? | select(. != null)
     | .H = (if $mode == "cmd" then ""
-            elif $H == "" then (input_filename | sub("^.*\\.shtory\\."; "") | sub("\\.jsonl$"; ""))
+            elif $H == "" then (input_filename | sub("^.*\\.shtory/"; "") | sub("\\.jsonl$"; ""))
             else $H end)
     | select(
       # ascii_downcase: test(...;"i") miscompiles in some jq versions
@@ -545,7 +546,7 @@ cmd_search() {
   q=${query_words[*]-}
 
   shopt -s nullglob
-  for f in "$HOME"/.shtory.*.jsonl; do
+  for f in "$HOME"/.shtory/*.jsonl; do
     h=$(host_of "$f")
     # shellcheck disable=SC2053 # $host glob pattern intended
     [[ $h == $host ]] && files+=("$f")
@@ -614,7 +615,7 @@ cmd_hostname() {
     echo "shtory: invalid hostname: $name" >&2
     return 2
   fi
-  mkdir -p "$HOME/.shtory"
+  (umask 077; mkdir -p "$HOME/.shtory")
   printf 'SHTORY_HOSTNAME=%s\n' "$name" > "$HOME/.shtory/shtory.env"
   echo "shtory: SHTORY_HOSTNAME=$name written to $HOME/.shtory/shtory.env"
 }
@@ -634,16 +635,16 @@ sync_pull() {
   mkdir -p "$dest"
   # seed with local copies so rsync's quick check skips files the remote hasn't changed
   shopt -s nullglob
-  for f in "$HOME"/.shtory.*.jsonl; do
+  for f in "$HOME"/.shtory/*.jsonl; do
     cp -p -- "$f" "$dest/"
   done
   shopt -u nullglob
-  rsync -zaPu "$h:~/.shtory.*.jsonl" "$dest/" || rc=$?
+  rsync -zaPu "$h:~/.shtory/*.jsonl" "$dest/" || rc=$?
   if (( rc == 0 )); then
     return 0
   fi
   # 23/24/30: partial transfer; merge what arrived and warn
-  if (( rc == 23 || rc == 24 || rc == 30 )) && compgen -G "$dest/.shtory.*.jsonl" >/dev/null; then
+  if (( rc == 23 || rc == 24 || rc == 30 )) && compgen -G "$dest/*.jsonl" >/dev/null; then
     echo "shtory: $h: pull incomplete (rsync $rc) - merged what arrived" >&2
     return 0
   fi
@@ -684,21 +685,21 @@ sync_merge() {
   local root=$1 f base tmp
   local -a files=() parts=()
   shopt -s nullglob
-  for f in "$root"/*/.shtory.*.jsonl; do
+  for f in "$root"/*/*.jsonl; do
     files+=("$f")
   done
   shopt -u nullglob
   for f in "${files[@]}"; do
     base=${f##*/}
     parts=("$root"/*/"$base")
-    [[ -f "$HOME/$base" ]] && parts=("$HOME/$base" "${parts[@]}")
-    tmp=$(mktemp "$HOME/$base.XXXXXX") # 0600, same dir so mv is atomic
+    [[ -f "$HOME/.shtory/$base" ]] && parts=("$HOME/.shtory/$base" "${parts[@]}")
+    tmp=$(mktemp "$HOME/.shtory/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
       | merge_lines "$tmpdir" 1 > "$tmp"; then
-      if cmp -s -- "$HOME/$base" "$tmp"; then
+      if cmp -s -- "$HOME/.shtory/$base" "$tmp"; then
         rm -f -- "$tmp" # unchanged: keep in-place mtime so the next push is a no-op
       else
-        mv -- "$tmp" "$HOME/$base"
+        mv -- "$tmp" "$HOME/.shtory/$base"
       fi
     else
       rm -f "$tmp"
@@ -712,16 +713,19 @@ sync_push() {
   local h=$1 name=$2 self=$3 f base
   local -a push=()
   shopt -s nullglob
-  for f in "$HOME"/.shtory.*.jsonl; do
+  for f in "$HOME"/.shtory/*.jsonl; do
     base=${f##*/}
-    if [[ $base == ".shtory.$name.jsonl" && $self -ne 1 ]]; then
+    if [[ $base == "$name.jsonl" && $self -ne 1 ]]; then
       continue
     fi
     push+=("$f")
   done
   shopt -u nullglob
   if [[ ${#push[@]} -gt 0 ]]; then
-    rsync -zaPu -- "${push[@]}" "$h:~/" || echo "shtory: $h: push failed" >&2
+    # the remote may not have the dir yet (fresh install, pre-first-log)
+    ssh -o ConnectTimeout=10 "$h" 'mkdir -p "$HOME/.shtory"' 2>/dev/null \
+      || { echo "shtory: $h: push failed" >&2; return 0; }
+    rsync -zaPu -- "${push[@]}" "$h:~/.shtory/" || echo "shtory: $h: push failed" >&2
   fi
 }
 
@@ -744,7 +748,7 @@ cmd_sync() {
   if [[ ${#hosts[@]} -eq 0 ]]; then
     local localhost=$SHTORY_HOSTNAME
     shopt -s nullglob
-    for f in "$HOME"/.shtory.*.jsonl; do
+    for f in "$HOME"/.shtory/*.jsonl; do
       h=$(host_of "$f")
       [[ $h == "$localhost" ]] && continue # skip self
       hosts+=("$h")
@@ -785,7 +789,7 @@ cmd_sync() {
   sync_merge "$tmpdir"
   if [[ -n $cap ]]; then
     shopt -s nullglob
-    for f in "$HOME"/.shtory.*.jsonl; do
+    for f in "$HOME"/.shtory/*.jsonl; do
       compact_file "$f" "$cap"
     done
     shopt -u nullglob
@@ -962,7 +966,7 @@ cmd_stats() {
     return 2
   fi
   shopt -s nullglob
-  for f in "$HOME"/.shtory.*.jsonl; do
+  for f in "$HOME"/.shtory/*.jsonl; do
     files+=("$f")
   done
   shopt -u nullglob
@@ -1023,7 +1027,7 @@ cmd_compact() {
     return 2
   fi
   shopt -s nullglob
-  for f in "$HOME"/.shtory.*.jsonl; do
+  for f in "$HOME"/.shtory/*.jsonl; do
     compact_file "$f" "$n"
   done
   shopt -u nullglob

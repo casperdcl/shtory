@@ -61,7 +61,7 @@ printf 'SHTORY_SKIP=secret_cmd\nsetopt hist_ignore_dups\nsetopt hist_ignore_spac
   HOME=$HZ SHTORY_HOSTNAME=zhost TERM=dumb \
     zsh -i < "$T/zcmds" > "$T/zhook_out" 2>/dev/null
 )
-F=$HZ/.shtory.zhost.jsonl
+F=$HZ/.shtory/zhost.jsonl
 [[ -f $F ]] && ok "zsh: history file created" || bad "zsh: history file created"
 [[ $(stat -c %a "$F") == 600 ]] && ok "zsh: history file mode 600" || bad "zsh: history file mode 600 ($(stat -c %a "$F"))"
 assert_eq "zsh: 5 commands logged (dup/space/secret skipped)" "5" "$(wc -l < "$F")"
@@ -93,7 +93,7 @@ EOF
   HOME=$H SHTORY_HOSTNAME=testhost SHTORY_SKIP='secret_cmd|PC' TERM=dumb \
     bash -i < "$T/hook.sh" > "$T/hook_out" 2>/dev/null
 )
-F=$H/.shtory.testhost.jsonl
+F=$H/.shtory/testhost.jsonl
 [[ -f $F ]] && ok "history file created" || bad "history file created"
 [[ $(stat -c %a "$F") == 600 ]] && ok "history file mode 600" || bad "history file mode 600 ($(stat -c %a "$F"))"
 assert_eq "PROMPT_COMMAND array entries kept" "PC:__shtory_log foo bar" "$(grep '^PC:' "$T/hook_out")"
@@ -109,7 +109,7 @@ SHTORY_BASHRC=$H2/.bashrc "$B" install >/dev/null
 printf 'old cmd one\nold cmd two\n' > "$H2/.bash_history"
 printf 'fresh cmd\n' > "$T/hook2.sh"
 ( HOME=$H2 SHTORY_HOSTNAME=testhost2 TERM=dumb bash -i < "$T/hook2.sh" >/dev/null 2>&1 )
-F2=$H2/.shtory.testhost2.jsonl
+F2=$H2/.shtory/testhost2.jsonl
 [[ -f $F2 && $(wc -l < "$F2") == 1 ]] && ok "re-read entry not re-logged" || bad "re-read entry not re-logged ($(jq -r .c "$F2" 2>/dev/null | tr '\n' '|'))"
 assert_eq "re-read entry: fresh cmd logged" "fresh cmd" "$(jq -r .c "$F2" 2>/dev/null)"
 
@@ -119,5 +119,5 @@ SHTORY_BASHRC=$H3/.bashrc "$B" install >/dev/null
 printf 'SHTORY_HOSTNAME=filehost\n' > "$H3/.shtory/shtory.env"
 printf 'envfile cmd\n' > "$T/hook3.sh"
 ( HOME=$H3 TERM=dumb bash -i < "$T/hook3.sh" >/dev/null 2>&1 )
-F3=$H3/.shtory.filehost.jsonl
+F3=$H3/.shtory/filehost.jsonl
 [[ -f $F3 && $(wc -l < "$F3") == 1 ]] && ok "env file host used by hook" || bad "env file host used by hook ($(jq -r .c "$F3" 2>/dev/null | tr '\n' '|'))"

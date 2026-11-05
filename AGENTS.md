@@ -16,7 +16,7 @@
 
 # history file format
 
-One JSON object per line in `~/.shtory.HOST.jsonl` (HOST: `$SHTORY_HOSTNAME` > `~/.shtory/shtory.env` > `$HOSTNAME`):
+One JSON object per line in `~/.shtory/HOST.jsonl` (HOST: `$SHTORY_HOSTNAME` > `~/.shtory/shtory.env` > `$HOSTNAME`):
 
 ```json
 {"t":1792893841,"d":"/path","e":1,"c":"some && command | line"}
