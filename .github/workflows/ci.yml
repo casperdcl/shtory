@@ -4,10 +4,18 @@ on:
   pull_request:
 jobs:
   test:
-    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || !contains('OWNER,MEMBER,COLLABORATOR', github.event.pull_request.author_association)
+    strategy: {matrix: {os: [ubuntu, macos]}}
+    runs-on: ${{ matrix.os }}-latest
     steps:
     - uses: actions/checkout@v7
     - name: deps
-      run: sudo apt-get update && sudo apt-get install -y shellcheck jq rsync openssh-client
+      run: |
+        case ${{ matrix.os }} in
+          ubuntu)
+            sudo apt-get update && sudo apt-get install -y shellcheck jq rsync openssh-client ;;
+          macos)
+            brew install shellcheck jq rsync openssh ;;
+        esac
     - run: shellcheck --severity=warning -x shtory tui-shtory test.bash test/*.sh
     - run: ./test.bash
