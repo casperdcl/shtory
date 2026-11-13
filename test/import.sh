@@ -72,3 +72,10 @@ SHELL=/usr/bin/zsh HOME=$I5 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/
 assert_eq "zsh: ~/.zsh_history imported, extended_history prefixes stripped" \
   $'{"t":0,"d":"","e":0,"c":"echo z"}\n{"t":0,"d":"","e":0,"c":"echo ext"}\n{"t":0,"d":"","e":0,"c":"git log"}' \
   "$(cat "$I5/.shtory/imphost.jsonl")"
+# control-char stripping keeps printable ASCII
+# (macOS/BSD sed treats [\x00-...] literally, eating digits/uppercase/':'/'x')
+I6=$T/importprintable; mkdir -p "$I6"
+printf '%s\n' 'exiftool /Users/X0/Desktop https://x.org:8080' > "$I6/.bash_history"
+SHELL=$BS HOME=$I6 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null 2>&1
+assert_eq "import: printable ASCII preserved (digits, uppercase, ':', 'x')" \
+  'exiftool /Users/X0/Desktop https://x.org:8080' "$(jq -r '.c' "$I6/.shtory/imphost.jsonl")"
