@@ -26,11 +26,11 @@ TOTAL  █ ▂ ▂ ▂             ▄                  ▂    10    0
    aa  █                   ▅                  ▂     6    0
    bb  █ █ █ █                                      4    0
 EOF
-)" "$(HOME=$G setsid "$B" stats --timeline)"
+)" "$(HOME=$G detach "$B" stats --timeline)"
 G1=$T/g1_home; mkdir -p "$G1/.shtory"
 printf '{"t":1000,"d":"/a","e":0,"c":"solo"}\n' > "$G1/.shtory/solo.jsonl"
 assert_eq "stats --timeline single point" $'       1970-01-01                    1970-01-01  cmds days\nTOTAL  █                                            1    0\n solo  █                                            1    0' \
-  "$(HOME=$G1 setsid "$B" stats --timeline)"
+  "$(HOME=$G1 detach "$B" stats --timeline)"
 # alignment: 2-digit counts/days right-align with 1-digit ones
 GA=$T/ga_home; mkdir -p "$GA/.shtory"
 printf '%s\n' '{"t":10,"d":"/a","e":0,"c":"x0"}' '{"t":11,"d":"/a","e":0,"c":"x1"}' '{"t":12,"d":"/a","e":0,"c":"x2"}' '{"t":13,"d":"/a","e":0,"c":"x3"}' '{"t":14,"d":"/a","e":0,"c":"x4"}' '{"t":15,"d":"/a","e":0,"c":"x5"}' '{"t":16,"d":"/a","e":0,"c":"x6"}' '{"t":17,"d":"/a","e":0,"c":"x7"}' '{"t":18,"d":"/a","e":0,"c":"x8"}' '{"t":19,"d":"/a","e":0,"c":"x9"}' '{"t":1041810,"d":"/a","e":0,"c":"x10"}' '{"t":1041814,"d":"/a","e":0,"c":"x11"}' > "$GA/.shtory/h1.jsonl"
@@ -41,7 +41,7 @@ TOTAL  █                                      ▁    15   12
    h1  █                                      ▁    12   12
    h2  █                                            3    0
 EOF
-)" "$(HOME=$GA setsid "$B" stats --timeline)"
+)" "$(HOME=$GA detach "$B" stats --timeline)"
 HOME=$G "$B" stats --timeline --cmd 2 >/dev/null 2>&1; assert_rc "stats --timeline exclusive rc 2" 2 $?
 GN=$T/gn_home; mkdir -p "$GN/.shtory"
 printf '{"t":0,"d":"","e":0,"c":"i"}\n' > "$GN/.shtory/h.jsonl"
@@ -52,24 +52,26 @@ assert_rc "stats --timeline t:0-only rc 1" 1 $rc
 GB=$T/ghbin; mkdir -p "$GB"
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$@" > "$0.args"' 'cp -- "${!#}" "$0.file"' > "$GB/gh"
 chmod +x "$GB/gh"
-out=$(PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline 2>&1); rc=$?
+out=$(PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G detach "$B" stats --timeline 2>&1); rc=$?
 assert_rc "gist gh rc 0" 0 $rc
 [[ $out == *"shtory: gist g1 updated"* ]] && ok "gist success message" || bad "gist success message ($out)"
 [[ $(cat "$GB/gh.args") == $'gist\nedit\ng1\n-f\nshtory.stats\n/'*'/shtory.stats' ]] && ok "gist gh args + default file" || bad "gist gh args + default file ($(cat "$GB/gh.args" | tr '\n' ' '))"
 grep -q 'aa' "$GB/gh.file" && [[ $(head -1 "$GB/gh.file") == *" cmds days" ]] && ok "gist text content" || bad "gist text content ($(head -1 "$GB/gh.file"))"
-LC_ALL=C.UTF-8 bash -c '
-  rc=0
-  while IFS= read -r l; do (( ${#l} <= 50 )) || rc=1; done < "$1"
-  exit $rc' _ "$GB/gh.file"
+# display width = code points, not bytes (the bar cells are 3-byte UTF-8);
+# count continuation bytes (0x80-0xBF) under the C locale
+LC_ALL=C awk 'BEGIN { lo = sprintf("%c", 128); hi = sprintf("%c", 191) }
+  { w = length($0); c = 0
+    for (i = 1; i <= w; i++) { ch = substr($0, i, 1); if (ch >= lo && ch <= hi) c++ }
+    if (w - c > 50) exit 1 }' "$GB/gh.file"
 [[ $? -eq 0 ]] && ok "gist lines <= 50 chars" || bad "gist lines <= 50 chars"
 rm -f "$GB/gh.args"
-PATH="$GB:$PATH" SHTORY_GIST_ID=g1 SHTORY_GIST_FILE=hist.txt HOME=$G setsid "$B" stats --timeline >/dev/null
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 SHTORY_GIST_FILE=hist.txt HOME=$G detach "$B" stats --timeline >/dev/null
 [[ $(sed -n 5p "$GB/gh.args") == hist.txt && $(tail -1 "$GB/gh.args") == /*/hist.txt ]] && ok "gist SHTORY_GIST_FILE override" || bad "gist SHTORY_GIST_FILE override ($(tr '\n' ' ' < "$GB/gh.args"))"
 rm -f "$GB/gh.args"
-HOME=$G setsid "$B" stats --timeline >/dev/null
+HOME=$G detach "$B" stats --timeline >/dev/null
 [[ ! -e $GB/gh.args ]] && ok "gist not called without SHTORY_GIST_ID" || bad "gist not called without SHTORY_GIST_ID"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 1' > "$GB/gh"
-PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline >/dev/null 2>&1
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G detach "$B" stats --timeline >/dev/null 2>&1
 assert_rc "gist gh failure propagates" 1 $?
 # empty gist: -f fails with "no file" -> retry with -a
 cat > "$GB/gh" <<'EOF'
@@ -82,7 +84,7 @@ printf '%s\n' "$@" > "$0.args"
 EOF
 chmod +x "$GB/gh"
 rm -f "$GB/gh.args"
-PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G setsid "$B" stats --timeline >/dev/null 2>&1
+PATH="$GB:$PATH" SHTORY_GIST_ID=g1 HOME=$G detach "$B" stats --timeline >/dev/null 2>&1
 assert_rc "gist -a fallback rc 0" 0 $?
 [[ $(sed -n 4p "$GB/gh.args") == -a && $(sed -n 5p "$GB/gh.args") == shtory.stats ]] && ok "gist -a fallback args" || bad "gist -a fallback args ($(tr '\n' ' ' < "$GB/gh.args"))"
 printf '%s\n' \
@@ -96,7 +98,7 @@ for i in $(seq 1 15); do
   printf '{"t":%s,"d":"/z","e":0,"c":"filler %s"}\n' "$((60 + i))" "$i" >> "$S/.shtory/hostB.jsonl"
 done
 HOME=$S "$B" compact 3
-assert_eq "compact keeps newest 3" "3" "$(wc -l < "$S/.shtory/hostB.jsonl")"
+assert_eq "compact keeps newest 3" "3" "$(nl "$S/.shtory/hostB.jsonl")"
 assert_eq "compact sorted by t" "75 900 1500" "$(jq -r .t "$S/.shtory/hostB.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 HOME=$S "$B" compact abc >/dev/null 2>&1; assert_rc "compact bad cap rc 2" 2 $?
 HOME=$S "$B" compact >/dev/null 2>&1; assert_rc "compact requires <N>" 2 $?
@@ -106,7 +108,7 @@ printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":5,"d":"/z","e":0,"c":"b"}' 
 HOME=$CE "$B" compact 10
 assert_eq "compact n>length: keep all, deduped, ascending" "1 3 5" "$(jq -r .t "$CE/.shtory/e.jsonl" | tr '\n' ' ' | sed 's/ $//')"
 HOME=$CE "$B" compact 0
-assert_eq "compact n=0: empties" "0" "$(wc -l < "$CE/.shtory/e.jsonl")"
+assert_eq "compact n=0: empties" "0" "$(nl "$CE/.shtory/e.jsonl")"
 # SHTORY_SAFE=1: jq merge fallback (dedupe + t-sort)
 printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":5,"d":"/z","e":0,"c":"b"}' '{"t":3,"d":"/z","e":0,"c":"c"}' '{"t":3,"d":"/z","e":0,"c":"c"}' > "$CE/.shtory/e2.jsonl"
 HOME=$CE SHTORY_SAFE=1 "$B" compact 10
@@ -114,4 +116,4 @@ assert_eq "compact SHTORY_SAFE=1: jq dedupe + t-sort" "1 3 5" "$(jq -r .t "$CE/.
 printf '%s\n' '{"t":1,"d":"/z","e":0,"c":"a"}' '{"t":2,"d":"/z","e":0,"c":"b"}' > "$CE/.shtory/m.jsonl"
 chmod 600 "$CE/.shtory/m.jsonl"
 HOME=$CE "$B" compact 5
-[[ $(stat -c %a "$CE/.shtory/m.jsonl") == 600 ]] && ok "compact preserves mode 600" || bad "compact preserves mode 600 ($(stat -c %a "$CE/.shtory/m.jsonl"))"
+[[ $(fmode "$CE/.shtory/m.jsonl") == 600 ]] && ok "compact preserves mode 600" || bad "compact preserves mode 600 ($(fmode "$CE/.shtory/m.jsonl"))"

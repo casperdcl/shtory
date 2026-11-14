@@ -11,7 +11,7 @@ assert_eq "install --import: block written" "1" "$(grep -cF '>>> shtory >>>' "$I
 assert_eq "install --import: unique, original order, t=0" \
   $'{"t":0,"d":"","e":0,"c":"ls"}\n{"t":0,"d":"","e":0,"c":"cd /tmp"}\n{"t":0,"d":"","e":0,"c":"git status"}' \
   "$(cat "$F")"
-[[ $(stat -c %a "$F") == 600 ]] && ok "install --import: file mode 600" || bad "install --import: file mode 600 ($(stat -c %a "$F"))"
+[[ $(fmode "$F") == 600 ]] && ok "install --import: file mode 600" || bad "install --import: file mode 600 ($(fmode "$F"))"
 assert_eq "imported searchable" "git status" \
   "$(HOME=$I SHTORY_HOSTNAME=imphost "$B" search -h imphost git)"
 # idempotent: re-running does not duplicate already-present commands
@@ -63,7 +63,7 @@ I4=$T/importbinary; mkdir -p "$I4"
 printf 'A cmd\na cmd\n#123\necho \0nul\nz cmd\n' > "$I4/.bash_history"
 SHELL=$BS HOME=$I4 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null 2>&1
 assert_rc "import: binary+mixed-case history does not fail" 0 $?
-assert_eq "import: binary+mixed-case imports 4 commands" 4 "$(wc -l < "$I4/.shtory/imphost.jsonl")"
+assert_eq "import: binary+mixed-case imports 4 commands" 4 "$(nl "$I4/.shtory/imphost.jsonl")"
 assert_eq "import: control chars stripped" "echo nul" "$(jq -r 'select(.c | startswith("echo")) | .c' "$I4/.shtory/imphost.jsonl")"
 # zsh: $SHELL=zsh defaults to ~/.zsh_history; extended_history ": <ts>:<s>;" prefixes stripped
 I5=$T/importzsh; mkdir -p "$I5"
@@ -72,3 +72,10 @@ SHELL=/usr/bin/zsh HOME=$I5 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/
 assert_eq "zsh: ~/.zsh_history imported, extended_history prefixes stripped" \
   $'{"t":0,"d":"","e":0,"c":"echo z"}\n{"t":0,"d":"","e":0,"c":"echo ext"}\n{"t":0,"d":"","e":0,"c":"git log"}' \
   "$(cat "$I5/.shtory/imphost.jsonl")"
+# control-char stripping keeps printable ASCII
+# (macOS/BSD sed treats [\x00-...] literally, eating digits/uppercase/':'/'x')
+I6=$T/importprintable; mkdir -p "$I6"
+printf '%s\n' 'exiftool /Users/X0/Desktop https://x.org:8080' > "$I6/.bash_history"
+SHELL=$BS HOME=$I6 SHTORY_HOSTNAME=imphost "$B" install --import >/dev/null 2>&1
+assert_eq "import: printable ASCII preserved (digits, uppercase, ':', 'x')" \
+  'exiftool /Users/X0/Desktop https://x.org:8080' "$(jq -r '.c' "$I6/.shtory/imphost.jsonl")"

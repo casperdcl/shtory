@@ -80,20 +80,17 @@ __shtory_log() {
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
-  [[ $h1 =~ $re ]] || return 0
-  # prompt appearing while user typing (input latency):
-  # history 1 shows unexecuted line with stale status;
-  # skip it (logged at the next prompt).
-  (( ${BASH_REMATCH[1]} > HISTCMD )) && return 0
-  # grows only on new commands, respecting HISTCONTROL;
-  # last entry's index is the list length;
-  # non-empty HISTFILE at first prompt means list came from re-read (not from user)
-  n=${BASH_REMATCH[1]}
+  n=0
+  [[ $h1 =~ $re ]] && n=${BASH_REMATCH[1]}
+  # n: list length; grows per command (HISTCONTROL respected),
+  # so log the last entry only when the list grew since the previous prompt.
+  # At first prompt, may only hold re-read (HISTFILE) or read-ahead (not yet executed) lines: never logged.
   if [[ -z ${__shtory_last_listlen-} ]]; then
-    [[ -s ${HISTFILE:-$HOME/.bash_history} ]] && __shtory_last_listlen=$n || __shtory_last_listlen=$((n - 1))
+    __shtory_last_listlen=$n
+    return 0
   fi
   # list shrank (history -c/-d restarted numbering): re-baseline
-  (( n < __shtory_last_listlen )) && __shtory_last_listlen=$((n - 1))
+  (( n < __shtory_last_listlen )) && __shtory_last_listlen=$n
   (( n <= __shtory_last_listlen )) && return 0
   __shtory_last_listlen=$n
   cmd=${BASH_REMATCH[2]}
@@ -112,7 +109,7 @@ __shtory_log() {
   d=${d//\"/\\\"}
   # creation: dir 0700, file 0600
   [[ -f $f ]] || { (umask 077; mkdir -p "$HOME/.shtory" 2>/dev/null; : >> "$f") 2>/dev/null || true; }
-  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS:-$(date +%s)}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
 if [[ ${PROMPT_COMMAND-} == *__shtory_log* ]]; then :;
@@ -305,7 +302,8 @@ remove_block() { # $1 = rcfile (rewrite in place, preserving permissions)
     { if (have) print prev; prev = $0; have = 1 }
     END { if (have && !skip) print prev }
   ' "$rcfile" > "$tmp"
-  chmod --reference="$rcfile" "$tmp" 2>/dev/null || true
+  mode=$(stat -c %a "$rcfile" 2>/dev/null || stat -f %Lp "$rcfile" 2>/dev/null)
+  [[ -n $mode ]] && chmod "$mode" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rcfile"
 }
 
@@ -333,7 +331,9 @@ import_history() {
   trap 'rm -f "${tmp-}" "${tmp2-}" "${out-}"' EXIT
   # strip control chars EXCEPT tab/CR (jq escapes those as \t/\r, matching the logging hook),
   # drop comments + zsh extended_history ": <ts>:<s>;" prefixes, dedupe against commands
-  if LC_ALL=C sed -e 's/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]//g' -e 's/^: [0-9]*:[0-9]*;//' "$src" \
+  # tr -d: BSD sed has no \xHH in bracket expressions
+  if LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' < "$src" \
+    | LC_ALL=C sed -e 's/^: [0-9]*:[0-9]*;//' \
     | { LC_ALL=C grep -a -v '^#' || true; } \
     | prog import \
     | jq -Rcn --slurpfile ex <( [[ -f $f ]] && cat "$f" ) \
@@ -341,7 +341,7 @@ import_history() {
          | [inputs | select(length > 0)]
          | reduce .[] as $c ({}; if ($exset[$c]) or (.[ $c ]) then . else .[$c] = true end)
          | keys_unsorted | .[] | {t:0,d:"",e:0,c:.}' > "$tmp"; then
-    n=$(wc -l < "$tmp")
+    n=$(wc -l < "$tmp" | tr -d '[:space:]')
     # stale imports: drop t:0 commands which now exist as t:!=0
     if [[ -f $f ]]; then
       tmp2=$(mktemp)
@@ -419,71 +419,87 @@ host_of() { local f=$1; f=${f##*/}; printf '%s' "${f%.jsonl}"; }
 # shellcheck disable=SC2016 # $home for jq
 TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startswith($home + "/") then "~" + .[($home | length):] else . end;'
 
-# shellcheck disable=SC2016 # $vars for jq
-JQ_PROG='
-# host from the filename .shtory/<host>.jsonl;
-# avoid (possibly jq version unsupported) named captures in sub templates
-# $plain=1: query is a plain substring (no regex metachars) -> contains (C-speed memmem, ~4x quicker)
-($q | ascii_downcase) as $ql
-| def entries:
-    . , inputs
-    | fromjson? | select(. != null)
-    | .H = (if $mode == "cmd" then ""
-            elif $H == "" then (input_filename | sub("^.*\\.shtory/"; "") | sub("\\.jsonl$"; ""))
-            else $H end)
-    | select(
-      # ascii_downcase: test(...;"i") miscompiles in some jq versions
-      (if $q == "" then true
-       elif $plain == "1" then ((.c | ascii_downcase) | contains($ql))
-       else ((.c | ascii_downcase) | test($ql)) end)
-      and (if $d == "" then true else (.d == $d) end)
-      and (if $e == "zero" then .e == 0
-           elif $e == "nonzero" then .e != 0
-           else true end)
-    );
-   def row:
-    .c + "\t" + (.d | tilde) + "\t" + (.e | tostring)
-    + "\t" + ((.t | todate | sub("T"; " ") | .[0:16])) + "\t" + .H;
-   # rows+none stream line-by-line (the picker; fzf_rows pre-sorts with tac);
-   # anything else slurps, sorts, caps
-if $mode == "rows" and $o == "none" then
-  (if $n == 0 then entries else limit($n; entries) end) | row
-else
-  [ entries ]
-  | ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
+# per-line query filter is a bash-selected program fragment (qfrag): keeps no-query select-free (fast)
+JQ_ROW='def row: .c + "\t" + (.d | tilde)
+  + "\t" + (.e | tostring)
+  + "\t" + ((.t | todate | .[0:10] + " " + .[11:16])) + "\t" + .H;'
+JQ_ROWS='inputs | fromjson? | select(. != null)'
+# shellcheck disable=SC2016 # $d $e for jq
+JQ_DE='select((if $d == "" then true else .d == $d end)
+  and (if $e == "zero" then .e == 0 elif $e == "nonzero" then .e != 0 else true end))'
+# shellcheck disable=SC2016 # $o $n for jq
+JQ_CMD_ORDER='| ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
       elif $o == "oldest" then group_by(.c) | map(min_by(.t)) | sort_by(.t)
       elif $o == "count" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
       elif $o == "frecency" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, s:(length * pow(2; (max_by(.t).t - now) / (30*86400)))}) | sort_by(-.s, -.t)
       else . end )
-  | (if $n == 0 then . else .[0:$n] end)
-  | .[]
-  | (if $mode == "rows" then row else .c end)
-end
-'
+  | (if $n == 0 then . else .[0:$n] end)'
+# shellcheck disable=SC2016 # $H $n for jq
+JQ_ROWS_TAIL=' | .H = $H | (if $n == 0 then . else limit($n; .) end) | row'
+
+# per-line query filter fragment (empty when $q is empty); $ql is the lowercased query
+qfrag() {
+  if [[ -n $q ]]; then
+    # shellcheck disable=SC2016 # $ql for jq
+    if (( plain )); then printf '| select(((.c | ascii_downcase) | contains($ql)))'
+    else printf '| select(((.c | ascii_downcase) | test($ql)))'; fi
+  fi
+}
+
+# tac else awk fallback
+TAC_BIN=$(command -v tac 2>/dev/null || true)
+reverse_file() {
+  if [[ -n $TAC_BIN ]]; then "$TAC_BIN" "$1"
+  else awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$1"; fi
+}
 
 # args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
 # shared jq args for query/fzf_rows; uses $cwd $efilter $limit
 jq_reset_args() { jqargs=(--arg d "$cwd" --arg e "$efilter" --argjson n "$limit" --arg home "$HOME"); }
 
+# $1 <= $2
+ver_ge() {
+  awk -v a="$1" -v b="$2" '
+    BEGIN { n = split(a, A, "."); m = split(b, B, ".")
+      for (i = 1; i <= (n > m ? n : m); i++) {
+        x = (i <= n ? A[i] : 0) + 0; y = (i <= m ? B[i] : 0) + 0
+        if (x > y) exit 1
+        if (x < y) exit 0
+      } exit 0 }' >/dev/null
+}
+
 query() {
-  local q=$1 mode=$2 msg='search'
+  local q=$1 mode=$2 msg='search' f jqprog
   command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
   local plain=1 # plain substring (no regex metachars)
   [[ -n ${q//[a-zA-Z0-9_ -]/} ]] && plain=0
+  local ql
+  ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
   jq_reset_args
-  jq -Rr \
-    --arg q "$q" --arg o "$order" --arg mode "$mode" --arg plain "$plain" \
-    "${jqargs[@]}" --arg H "" "${TILDE_JQ}${JQ_PROG}" "${files[@]}" | prog "$msg"
+  if [[ $mode == rows && $order == none ]]; then
+    # per-file stream (no cross-file ordering): .H known per file, no input_filename
+    jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS}$(qfrag) | ${JQ_DE}${JQ_ROWS_TAIL}"
+    for f in "${files[@]}"; do
+      jq -nRr --argjson n "$limit" --arg ql "$ql" "${jqargs[@]}" --arg H "$(host_of "$f")" "$jqprog" "$f"
+    done | prog "$msg"
+  else
+    # slurp + order (cross-file); .H from the filename
+    local out hass=''
+    if [[ $mode == rows ]]; then out=row hass=' | .H = (input_filename | sub("^.*\\.shtory/"; "") | sub("\\.jsonl$"; ""))'
+    else out=.c; fi
+    jqprog="${TILDE_JQ}${JQ_ROW}[ ${JQ_ROWS}$(qfrag) | ${JQ_DE}${hass} ] ${JQ_CMD_ORDER} | .[] | $out"
+    jq -nRr --arg o "$order" --argjson n "$limit" --arg ql "$ql" "${jqargs[@]}" --arg H "" "$jqprog" "${files[@]}" | prog "$msg"
+  fi
 }
 
 # streaming newest-first rows of t-ordered files
 fzf_rows() {
   local f line t
   jq_reset_args
+  local jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS}${JQ_ROWS_TAIL}"
   while IFS=$'\t' read -r t f; do
-    tac "$f" | jq -Rr \
-      --arg q '' --arg o none --arg mode rows --arg plain 1 \
-      "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}"
+    # || break: picker cancelled -> stop producing (consumer's stdin is closed)
+    reverse_file "$f" | jq -nRr "${jqargs[@]}" --arg H "$(host_of "$f")" "$jqprog" || break
   done < <(
     for f in "${files[@]}"; do
       line=$(tail -n 1 "$f" 2>/dev/null)
@@ -508,7 +524,7 @@ search_loop() {
       continue
     fi
     local -a rows=()
-    mapfile -t rows <<< "$out"
+    while IFS= read -r l; do rows+=("$l"); done <<< "$out"
     for n in "${!rows[@]}"; do
       printf ' %2d  %s\n' "$((n + 1))" "${rows[n]//$'\t'/  }" >&2
     done
@@ -570,8 +586,7 @@ cmd_search() {
       picker_opts=(--scheme=history --info=inline-right --border=none --no-scrollbar)
       fzf_v=$(fzf --version 2>/dev/null | awk '{print $1}')
       # --freeze-left needs fzf>=0.67
-      [[ $(printf '%s\n0.67.0\n' "$fzf_v" | sort -V | head -n1) == 0.67.0 ]] \
-        && picker_opts+=(--freeze-left=1)
+      ver_ge 0.67.0 "$fzf_v" && picker_opts+=(--freeze-left=1)
     fi
   fi
   if [[ -z $limit ]]; then
@@ -763,8 +778,12 @@ cmd_sync() {
   tmpdir=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
   trap 'rm -rf "${tmpdir-}"' EXIT
 
+  # host->reported-name map in a file (bash 3.2 has no associative arrays)
+  namesfile="$tmpdir/names"
+  : > "$namesfile"
+  name_of_get() { awk -F'\t' -v h="$1" '$1==h {print $2; exit}' "$namesfile"; }
+
   local -a pulled=() f
-  declare -A name_of=()
   for h in "${hosts[@]}"; do
     if ! ssh_config_host "$h"; then
       echo "shtory: skipping '$h' (not in ~/.ssh/config)" >&2
@@ -779,7 +798,7 @@ cmd_sync() {
       echo "shtory: $h: unreachable (skipped)" >&2
       continue
     fi
-    name_of[$h]=${name:-$h}
+    printf '%s\t%s\n' "$h" "${name:-$h}" >> "$namesfile"
     sync_pull "$h" "$tmpdir/$h" && pulled+=("$h")
   done
   if [[ ${#pulled[@]} -eq 0 ]]; then
@@ -795,9 +814,10 @@ cmd_sync() {
     shopt -u nullglob
   fi
   for h in "${pulled[@]}"; do
-    sync_push "$h" "${name_of[$h]}" "$self"
-    if [[ ${name_of[$h]} != "$h" ]]; then
-      echo "shtory: $h: synced (as ${name_of[$h]})"
+    rep=$(name_of_get "$h")
+    sync_push "$h" "$rep" "$self"
+    if [[ $rep != "$h" ]]; then
+      echo "shtory: $h: synced (as $rep)"
     else
       echo "shtory: $h: synced"
     fi
@@ -814,7 +834,8 @@ timeline_grid() {
     h=${rest%% *}; rest=${rest#* }
     first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
     # per-bin counts over W-cell axis
-    mapfile -t cnt < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
+    cnt=()
+    while IFS= read -r v; do cnt+=("$v"); done < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
       { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
         if (b >= w) b = w - 1
         c[b]++
@@ -905,11 +926,13 @@ stats_timeline() {
   fi
   # combine hosts for TOTAL row; then sort by recent use
   cat -- "$tmpd"/* > "$tmpd/total"
-  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -k4,4nr)
-  rows=("$tmpd/total TOTAL $gstart $gend $tn" "${rows[@]}")
+  local -a sorted=()
+  while IFS= read -r r; do sorted+=("$r"); done < <(printf '%s\n' "${rows[@]}" | sort -k4,4nr)
+  rows=("$tmpd/total TOTAL $gstart $gend $tn" "${sorted[@]}")
   span=$(( gend - gstart ))
-  s=$(date -u -d "@$gstart" +%Y-%m-%d)
-  e=$(date -u -d "@$gend" +%Y-%m-%d)
+  epochdate() { date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u -r "$1" +%Y-%m-%d; }
+  s=$(epochdate "$gstart")
+  e=$(epochdate "$gend")
   # row width = name(namew) + 2sp + axis(W) + 2sp + count(wN) + 1sp + days(wD);
   # wN/wD must be known before W can be clamped to the terminal
   local r rest x
