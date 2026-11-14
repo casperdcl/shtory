@@ -419,47 +419,39 @@ host_of() { local f=$1; f=${f##*/}; printf '%s' "${f%.jsonl}"; }
 # shellcheck disable=SC2016 # $home for jq
 TILDE_JQ='def tilde: if $home == "" then . elif . == $home then "~" elif startswith($home + "/") then "~" + .[($home | length):] else . end;'
 
-# shellcheck disable=SC2016 # $vars for jq
-JQ_PROG='
-# host from the filename .shtory/<host>.jsonl;
-# avoid (possibly jq version unsupported) named captures in sub templates
-# $plain=1: query is a plain substring (no regex metachars) -> contains (C-speed memmem, ~4x quicker)
-($q | ascii_downcase) as $ql
-| def entries:
-    . , inputs
-    | fromjson? | select(. != null)
-    | .H = (if $mode == "cmd" then ""
-            elif $H == "" then (input_filename | sub("^.*\\.shtory/"; "") | sub("\\.jsonl$"; ""))
-            else $H end)
-    | select(
-      # ascii_downcase: test(...;"i") miscompiles in some jq versions
-      (if $q == "" then true
-       elif $plain == "1" then ((.c | ascii_downcase) | contains($ql))
-       else ((.c | ascii_downcase) | test($ql)) end)
-      and (if $d == "" then true else (.d == $d) end)
-      and (if $e == "zero" then .e == 0
-           elif $e == "nonzero" then .e != 0
-           else true end)
-    );
-   def row:
-    .c + "\t" + (.d | tilde) + "\t" + (.e | tostring)
-    + "\t" + ((.t | todate | sub("T"; " ") | .[0:16])) + "\t" + .H;
-   # rows+none stream line-by-line (the picker; fzf_rows pre-sorts with tac);
-   # anything else slurps, sorts, caps
-if $mode == "rows" and $o == "none" then
-  (if $n == 0 then entries else limit($n; entries) end) | row
-else
-  [ entries ]
-  | ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
+# per-line query filter is a bash-selected program fragment (qfrag): keeps no-query select-free (fast)
+JQ_ROW='def row: .c + "\t" + (.d | tilde)
+  + "\t" + (.e | tostring)
+  + "\t" + ((.t | todate | .[0:10] + " " + .[11:16])) + "\t" + .H;'
+JQ_ROWS='inputs | fromjson? | select(. != null)'
+# shellcheck disable=SC2016 # $d $e for jq
+JQ_DE='select((if $d == "" then true else .d == $d end)
+  and (if $e == "zero" then .e == 0 elif $e == "nonzero" then .e != 0 else true end))'
+# shellcheck disable=SC2016 # $o $n for jq
+JQ_CMD_ORDER='| ( if $o == "newest" then group_by(.c) | map(max_by(.t)) | sort_by(-.t)
       elif $o == "oldest" then group_by(.c) | map(min_by(.t)) | sort_by(.t)
       elif $o == "count" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, n:length}) | sort_by(-.n, -.t)
       elif $o == "frecency" then group_by(.c) | map({c:.[0].c, d:.[0].d, e:.[0].e, H:.[0].H, t:max_by(.t).t, s:(length * pow(2; (max_by(.t).t - now) / (30*86400)))}) | sort_by(-.s, -.t)
       else . end )
-  | (if $n == 0 then . else .[0:$n] end)
-  | .[]
-  | (if $mode == "rows" then row else .c end)
-end
-'
+  | (if $n == 0 then . else .[0:$n] end)'
+# shellcheck disable=SC2016 # $H $n for jq
+JQ_ROWS_TAIL=' | .H = $H | (if $n == 0 then . else limit($n; .) end) | row'
+
+# per-line query filter fragment (empty when $q is empty); $ql is the lowercased query
+qfrag() {
+  if [[ -n $q ]]; then
+    # shellcheck disable=SC2016 # $ql for jq
+    if (( plain )); then printf '| select(((.c | ascii_downcase) | contains($ql)))'
+    else printf '| select(((.c | ascii_downcase) | test($ql)))'; fi
+  fi
+}
+
+# tac else awk fallback
+TAC_BIN=$(command -v tac 2>/dev/null || true)
+reverse_file() {
+  if [[ -n $TAC_BIN ]]; then "$TAC_BIN" "$1"
+  else awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$1"; fi
+}
 
 # args: query mode(cmd|rows); uses $files $cwd $efilter $order $limit
 # shared jq args for query/fzf_rows; uses $cwd $efilter $limit
@@ -477,24 +469,37 @@ ver_ge() {
 }
 
 query() {
-  local q=$1 mode=$2 msg='search'
+  local q=$1 mode=$2 msg='search' f jqprog
   command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
   local plain=1 # plain substring (no regex metachars)
   [[ -n ${q//[a-zA-Z0-9_ -]/} ]] && plain=0
+  local ql
+  ql=$(printf '%s' "$q" | tr '[:upper:]' '[:lower:]')
   jq_reset_args
-  jq -Rr \
-    --arg q "$q" --arg o "$order" --arg mode "$mode" --arg plain "$plain" \
-    "${jqargs[@]}" --arg H "" "${TILDE_JQ}${JQ_PROG}" "${files[@]}" | prog "$msg"
+  if [[ $mode == rows && $order == none ]]; then
+    # per-file stream (no cross-file ordering): .H known per file, no input_filename
+    jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS}$(qfrag) | ${JQ_DE}${JQ_ROWS_TAIL}"
+    for f in "${files[@]}"; do
+      jq -nRr --argjson n "$limit" --arg ql "$ql" "${jqargs[@]}" --arg H "$(host_of "$f")" "$jqprog" "$f"
+    done | prog "$msg"
+  else
+    # slurp + order (cross-file); .H from the filename
+    local out hass=''
+    if [[ $mode == rows ]]; then out=row hass=' | .H = (input_filename | sub("^.*\\.shtory/"; "") | sub("\\.jsonl$"; ""))'
+    else out=.c; fi
+    jqprog="${TILDE_JQ}${JQ_ROW}[ ${JQ_ROWS}$(qfrag) | ${JQ_DE}${hass} ] ${JQ_CMD_ORDER} | .[] | $out"
+    jq -nRr --arg o "$order" --argjson n "$limit" --arg ql "$ql" "${jqargs[@]}" --arg H "" "$jqprog" "${files[@]}" | prog "$msg"
+  fi
 }
 
 # streaming newest-first rows of t-ordered files
 fzf_rows() {
   local f line t
   jq_reset_args
+  local jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS}${JQ_ROWS_TAIL}"
   while IFS=$'\t' read -r t f; do
-    awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$f" | jq -Rr \
-      --arg q '' --arg o none --arg mode rows --arg plain 1 \
-      "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}" || break
+    # || break: picker cancelled -> stop producing (consumer's stdin is closed)
+    reverse_file "$f" | jq -nRr "${jqargs[@]}" --arg H "$(host_of "$f")" "$jqprog" || break
   done < <(
     for f in "${files[@]}"; do
       line=$(tail -n 1 "$f" 2>/dev/null)
