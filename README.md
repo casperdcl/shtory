@@ -48,7 +48,7 @@ shtory search [options] [<query>...]
 - `-h`, `--hostname <name>`: glob filter by host (default `*`)
 - `-H`, `--localhost`: filter to current machine
 - `-c`, `--cwd`: filter to current path (`$PWD`)
-- `-s`, `--sort <order>`: `frecency` (default; count×recency 30d halflife decay), `newest`, `oldest`, `count` (frequency)
+- `-s`, `--sort <order>`: `frecency` (default; count×recency 30d halflife decay), `newest`, `oldest`, `count` (frequency); always overridden to `newest` in interactive mode
 - `-n`, `--limit <n>`: max results, default 0 (unlimited)
 - `-z`, `--zero` / `-Z`, `--nonzero`: exit code filter
 

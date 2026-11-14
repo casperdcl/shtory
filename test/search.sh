@@ -57,3 +57,10 @@ assert_eq "fzf stream: newest file first, newest first" $'own-new\nown-old\nothe
   "$(HOME=$SH shtory_fn 'cwd= efilter= limit=0 files=("'$SH'/.shtory/other.jsonl" "'$SH'/.shtory/own.jsonl"); fzf_rows' | cut -f1)"
 assert_eq "fzf stream: single file, newest first" $'other-new\nother-old' \
   "$(HOME=$SH shtory_fn 'cwd= efilter= limit=0 files=("'$SH'/.shtory/other.jsonl"); fzf_rows' | cut -f1)"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"ok-cmd"}' '{"t":2,"d":"/x","e":1,"c":"bad-cmd"}' '{"t":3,"d":"/y","e":0,"c":"dir-cmd"}' > "$SH/.shtory/mixed.jsonl"
+assert_eq "fzf stream: zero filter" $'dir-cmd\nok-cmd' \
+  "$(HOME=$SH shtory_fn 'cwd= efilter=zero limit=0 files=("'$SH'/.shtory/mixed.jsonl"); fzf_rows' | cut -f1)"
+assert_eq "fzf stream: nonzero filter" $'bad-cmd' \
+  "$(HOME=$SH shtory_fn 'cwd= efilter=nonzero limit=0 files=("'$SH'/.shtory/mixed.jsonl"); fzf_rows' | cut -f1)"
+assert_eq "fzf stream: cwd filter" $'bad-cmd\nok-cmd' \
+  "$(HOME=$SH shtory_fn 'cwd=/x efilter= limit=0 files=("'$SH'/.shtory/mixed.jsonl"); fzf_rows' | cut -f1)"

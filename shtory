@@ -51,6 +51,7 @@ search options:
   -H, --localhost         same as -h="$SHTORY_HOSTNAME"
   -c, --cwd               only commands run in $PWD
   -s, --sort <order>      frecency (default)/newest/oldest/count
+                          (interactive: newest)
   -n, --limit <n>         max results, default 0 (unlimited)
   -z, --zero              only commands with exit code 0
   -Z, --nonzero           only commands with non-zero exit code
@@ -496,7 +497,7 @@ query() {
 fzf_rows() {
   local f line t
   jq_reset_args
-  local jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS}${JQ_ROWS_TAIL}"
+  local jqprog="${TILDE_JQ}${JQ_ROW}${JQ_ROWS} | ${JQ_DE}${JQ_ROWS_TAIL}"
   while IFS=$'\t' read -r t f; do
     # || break: picker cancelled -> stop producing (consumer's stdin is closed)
     reverse_file "$f" | jq -nRr "${jqargs[@]}" --arg H "$(host_of "$f")" "$jqprog" || break

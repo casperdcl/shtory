@@ -31,7 +31,7 @@ else
   # cmd_search must treat that as cancel, not as an empty selection
   # (an empty selection wipes the caller's current line via READLINE_LINE='')
   FZH=$T/fz_home; FNP=$T/fzpath; mkdir -p "$FZH/.shtory" "$FNP"
-  for b in bash sh jq cat stty awk sleep; do
+  for b in bash sh jq cat stty awk sleep grep tail cut sort head; do
     p=$(command -v "$b") && ln -sf "$p" "$FNP/$b"
   done
   printf '%s\n' '#!/usr/bin/env bash' 'sleep 1; exit 0' > "$FNP/fzf" # fzf: enter on empty list
@@ -41,6 +41,23 @@ else
     | SHELL=$FNP/bash PATH="$FNP" HOME=$FZH \
     pty_run "$B search" > "$T/fz_out" 2>/dev/null
   assert_rc "fzf: enter on empty list cancels (rc 1, no wipe)" 1 "$?"
+
+  # fzf picker rows: the picker always streams newest-first, regardless of -s
+  # (a full pass for cross-file sort is too slow for big histories)
+  printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ ${1-} == --version ]]; then echo 0.61.0; exit 0; fi' \
+    "cat > $T/fzf_in; exit 130" > "$FNP/fzf"
+  chmod +x "$FNP/fzf"
+  : > "$T/fzf_in"
+  sleep 2 | SHELL=$FNP/bash PATH="$FNP" HOME=$PTH pty_run "$B search" >/dev/null 2>&1
+  assert_eq "fzf picker: rows stream newest-first" \
+    $'git push\t/x\t0\t1970-01-01 00:00\tpty\ngit status\t/x\t0\t1970-01-01 00:00\tpty' \
+    "$(cat "$T/fzf_in")"
+  : > "$T/fzf_in"
+  sleep 2 | SHELL=$FNP/bash PATH="$FNP" HOME=$PTH pty_run "$B search -s oldest" >/dev/null 2>&1
+  assert_eq "fzf picker: -s does not force a full pass (no hang)" \
+    $'git push\t/x\t0\t1970-01-01 00:00\tpty\ngit status\t/x\t0\t1970-01-01 00:00\tpty' \
+    "$(cat "$T/fzf_in")"
 
   # tui-shtory: rows from a file (EOF), keys via the pty
   printf 'alpha cmd\nbeta cmd\n' > "$T/tui_rows"
