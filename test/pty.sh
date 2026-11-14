@@ -4,10 +4,11 @@
 source ./test/common.sh
 
 echo "# interactive (pty via script(1); skipped if unavailable)"
-if ! command -v script >/dev/null 2>&1; then
-  echo "SKIP - script (util-linux) not installed"
+if ! command -v script >/dev/null 2>&1 || ! script --version >/dev/null 2>&1; then
+  echo "SKIP - GNU script missing (-e returns child rc, output copied to stdout, stdin EOF forwarded)"
 else
   SC=$(command -v script)
+  pty_run() { "$SC" -qec "$1" /dev/null 2>/dev/null; }
   # last content line of a pty capture: drop CR/ESC bytes and CSI parameter text
   lastline() {
     printf '%s\n' "$1" | tr -d '\r\033' | sed 's/\[[0-9;?]*[a-zA-Z]//g' \
@@ -23,7 +24,7 @@ else
 
   # numbered loop: type a pattern, select row 1 (newest match)
   out=$(printf 'git\n1\n' | SHELL=$NP/bash PATH=$NP HOME=$PTH \
-    "$SC" -qec "$B search" /dev/null 2>/dev/null | tr -d '\r')
+    pty_run "$B search" 2>/dev/null | tr -d '\r')
   [[ $(lastline "$out") == *"git push"* ]] && ok "pty: numbered loop selects" || bad "pty: numbered loop selects ($(lastline "$out"))"
 
   # fzf exits 0 with no output on Enter over an empty list (its contract):
@@ -38,13 +39,13 @@ else
   : > "$FZH/.shtory/fz.jsonl"
   { sleep 0.5; printf '\r'; sleep 2; } \
     | SHELL=$FNP/bash PATH="$FNP" HOME=$FZH \
-    "$SC" -qec "$B search" /dev/null > "$T/fz_out" 2>/dev/null
-  assert_rc "fzf: enter on empty list cancels (rc 1, no wipe)" 1 $?
+    pty_run "$B search" > "$T/fz_out" 2>/dev/null
+  assert_rc "fzf: enter on empty list cancels (rc 1, no wipe)" 1 "$?"
 
   # tui-shtory: rows from a file (EOF), keys via the pty
   printf 'alpha cmd\nbeta cmd\n' > "$T/tui_rows"
   out=$(printf 'a\n' | SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
-    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows" /dev/null 2>/dev/null | tr -d '\r')
+    pty_run "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows" 2>/dev/null | tr -d '\r')
   [[ $(lastline "$out") == *"alpha cmd"* ]] && ok "pty: tui-shtory filters & selects" || bad "pty: tui-shtory filters & selects ($(lastline "$out"))"
 
   # tui-shtory streaming: the TUI is interactive before stdin delivers rows
@@ -56,14 +57,14 @@ else
 EOF
   out=$( { sleep 0.2; printf '\r'; sleep 1.5; } | \
     SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
-    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; bash $T/tui_slow.sh $TUI" /dev/null 2>/dev/null | tr -d '\r')
+    pty_run "stty rows 20 cols 60 2>/dev/null; bash $T/tui_slow.sh $TUI" 2>/dev/null | tr -d '\r')
   [[ $out == *$'\e[?1049h'* && $out != *"gamma cmd"* ]] && ok "pty: tui-shtory interactive before rows arrive" || bad "pty: tui-shtory interactive before rows arrive"
 
   # tui-shtory: arrow keys re-render (the inverted row follows sel)
   printf 'alpha x\nbeta x\n' > "$T/tui_rows2"
   out=$( { sleep 0.7; printf '\x1b[A'; sleep 0.3; printf '\r'; } | \
     SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
-    "$SC" -qec "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows2" /dev/null 2>/dev/null | tr -d '\r')
+    pty_run "stty rows 20 cols 60 2>/dev/null; $TUI < $T/tui_rows2" 2>/dev/null | tr -d '\r')
   [[ $out == *$'\e[7m beta'* ]] && ok "pty: tui-shtory arrow re-renders" || bad "pty: tui-shtory arrow re-renders"
 
   # tui-shtory --freeze-left: a frozen field wider than the window must clip,
@@ -71,7 +72,7 @@ EOF
   printf 'averyveryveryverylongcommandword\tx\n' > "$T/tui_rows3"
   out=$( { sleep 0.7; printf 'x'; sleep 0.5; printf '\x1b'; sleep 0.5; } | \
     SHELL=$NP/bash PATH="$NP:$PATH" HOME=$PTH \
-    "$SC" -qec "stty rows 8 cols 24 2>/dev/null; $TUI --freeze-left=1 < $T/tui_rows3" /dev/null 2>/dev/null | tr -d '\r')
+    pty_run "stty rows 8 cols 24 2>/dev/null; $TUI --freeze-left=1 < $T/tui_rows3" 2>/dev/null | tr -d '\r')
   [[ $out != *substring* && $out != *unbound* && $out == *"averyveryveryverylongc"* ]] \
     && ok "pty: tui-shtory freeze overflow clips" || bad "pty: tui-shtory freeze overflow clips ($(lastline "$out"))"
 
@@ -88,7 +89,7 @@ EOF
     SHELL=/usr/bin/zsh SHTORY_ZSHRC=$ZP/.zshrc "$B" install >/dev/null
     out=$( { sleep 0.5; printf '\x12'; sleep 1.5; printf 'echo\n'; sleep 1.5; printf '1\n'; sleep 1.5; printf '\r'; sleep 1.5; printf 'exit\n'; sleep 0.5; } \
       | HOME=$ZP PATH="$ZP/bin" TERM=linux \
-      "$SC" -qec "$(command -v zsh) -i" /dev/null 2>/dev/null | tr -d '\r' )
+      pty_run "$(command -v zsh) -i" 2>/dev/null | tr -d '\r' )
     [[ $out == *"zsel two"* ]] && ok "pty: zsh ctrl-r widget inserts & runs" || bad "pty: zsh ctrl-r widget inserts & runs ($(lastline "$out"))"
   fi
 
@@ -103,7 +104,7 @@ EOF
     printf 'HISTCONTROL=%s\n' "$hc" >> "$HC/.bashrc"
     { for line in "$@"; do sleep 0.25; printf '%s\n' "$line"; done
       sleep 0.25; printf 'exit\n'; sleep 0.5; } \
-      | SHELL=$NP/bash PATH=$NP HOME=$HC "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
+      | SHELL=$NP/bash PATH=$NP HOME=$HC pty_run "bash -i" >/dev/null 2>&1
     jq -r .c "$HC"/.shtory/*.jsonl 2>/dev/null
   }
   assert_eq "HISTCONTROL unset saves all" $'echo a\necho a\necho b' "$(hc_run '' 'echo a' 'echo a' 'echo b')"
@@ -117,7 +118,7 @@ EOF
   SHTORY_BASHRC=$HC2/.bashrc HOME=$HC2 "$B" install >/dev/null
   { for line in 'echo a' 'echo b' 'history -c' 'echo c' 'echo d'; do sleep 0.25; printf '%s\n' "$line"; done
     sleep 0.25; printf 'exit\n'; sleep 0.5; } \
-    | SHELL=$NP/bash PATH=$NP HOME=$HC2 "$SC" -qec "bash -i" /dev/null >/dev/null 2>&1
+    | SHELL=$NP/bash PATH=$NP HOME=$HC2 pty_run "bash -i" >/dev/null 2>&1
   assert_eq "history -c: logging continues after clear" $'echo a\necho b\necho c\necho d' \
     "$(jq -r .c "$HC2"/.shtory/*.jsonl 2>/dev/null)"
 fi

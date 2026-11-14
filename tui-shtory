@@ -201,12 +201,12 @@ main() {
     start=$(( sel - h + 1 < 0 ? 0 : sel - h + 1 ))
     top=$(( nlist - h < 0 ? 0 : nlist - h ))
     (( start > top )) && start=$top
-    # materialise only the visible h rows (sed + mapfile, C-speed); the
+    # materialise only the visible h rows (sed + read loop, C-speed); the
     # window is stable while rows stream in at the newest end, so a
     # streaming load neither flickers nor re-scans the whole file
     local -a window=()
     if (( nlist > 0 )); then
-      mapfile -t window < <(sed -n "$(( start + 1 )),$(( start + h ))p" "$activefile")
+      while IFS= read -r wl; do window+=("$wl"); done < <(sed -n "$(( start + 1 )),$(( start + h ))p" "$activefile")
     fi
     local wcount=${#window[@]} seli=$(( sel - start ))
     # max length over the visible window only (O(h), not O(rows)); the

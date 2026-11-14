@@ -63,13 +63,13 @@ printf 'SHTORY_SKIP=secret_cmd\nsetopt hist_ignore_dups\nsetopt hist_ignore_spac
 )
 F=$HZ/.shtory/zhost.jsonl
 [[ -f $F ]] && ok "zsh: history file created" || bad "zsh: history file created"
-[[ $(stat -c %a "$F") == 600 ]] && ok "zsh: history file mode 600" || bad "zsh: history file mode 600 ($(stat -c %a "$F"))"
-assert_eq "zsh: 5 commands logged (dup/space/secret skipped)" "5" "$(wc -l < "$F")"
+[[ $(fmode "$F") == 600 ]] && ok "zsh: history file mode 600" || bad "zsh: history file mode 600 ($(fmode "$F"))"
+assert_eq "zsh: 5 commands logged (dup/space/secret skipped)" "5" "$(nl "$F")"
 jq -e 'has("t") and has("d") and has("e") and has("c")' "$F" >/dev/null 2>&1 && ok "zsh: all lines valid JSON" || bad "zsh: all lines valid JSON"
 assert_eq "zsh: exit code captured" "1" "$(jq -r 'select(.c == "false") | .e' "$F")"
 assert_eq "zsh: pipeline captured whole" "echo a | grep a" "$(jq -r 'select(.c == "echo a | grep a") | .c' "$F")"
 assert_eq "zsh: cwd captured" "/tmp" "$(jq -r 'select(.c == "echo hi") | .d' "$F")"
-assert_eq "zsh: dup skipped (hist_ignore_dups)" "1" "$(jq -r 'select(.c == "echo a") | .c' "$F" | wc -l)"
+assert_eq "zsh: dup skipped (hist_ignore_dups)" "1" "$(jq -r 'select(.c == "echo a") | .c' "$F" | wc -l | tr -d '[:space:]')"
 assert_eq "zsh: quoted cmd escaped" 'printf '\''q"uote and \back\slash'\''' "$(jq -r 'select(.c | contains("q\"uote")) | .c' "$F")"
 else
   echo "SKIP - zsh not installed"
@@ -95,9 +95,9 @@ EOF
 )
 F=$H/.shtory/testhost.jsonl
 [[ -f $F ]] && ok "history file created" || bad "history file created"
-[[ $(stat -c %a "$F") == 600 ]] && ok "history file mode 600" || bad "history file mode 600 ($(stat -c %a "$F"))"
+[[ $(fmode "$F") == 600 ]] && ok "history file mode 600" || bad "history file mode 600 ($(fmode "$F"))"
 assert_eq "PROMPT_COMMAND array entries kept" "PC:__shtory_log foo bar" "$(grep '^PC:' "$T/hook_out")"
-assert_eq "4 commands logged (secret skipped)" "4" "$(wc -l < "$F")"
+assert_eq "4 commands logged (secret skipped)" "4" "$(nl "$F")"
 jq -e 'has("t") and has("d") and has("e") and has("c")' "$F" >/dev/null 2>&1 && ok "all lines valid JSON" || bad "all lines valid JSON"
 assert_eq "exit code captured" "1" "$(jq -r 'select(.c == "false") | .e' "$F")"
 assert_eq "pipeline captured whole" "echo a | grep a" "$(jq -r 'select(.c == "echo a | grep a") | .c' "$F")"
@@ -110,7 +110,7 @@ printf 'old cmd one\nold cmd two\n' > "$H2/.bash_history"
 printf 'fresh cmd\n' > "$T/hook2.sh"
 ( HOME=$H2 SHTORY_HOSTNAME=testhost2 TERM=dumb bash -i < "$T/hook2.sh" >/dev/null 2>&1 )
 F2=$H2/.shtory/testhost2.jsonl
-[[ -f $F2 && $(wc -l < "$F2") == 1 ]] && ok "re-read entry not re-logged" || bad "re-read entry not re-logged ($(jq -r .c "$F2" 2>/dev/null | tr '\n' '|'))"
+[[ -f $F2 && $(nl "$F2") == 1 ]] && ok "re-read entry not re-logged" || bad "re-read entry not re-logged ($(jq -r .c "$F2" 2>/dev/null | tr '\n' '|'))"
 assert_eq "re-read entry: fresh cmd logged" "fresh cmd" "$(jq -r .c "$F2" 2>/dev/null)"
 
 # hostname resolved from ~/.shtory/shtory.env (no SHTORY_HOSTNAME env var)
@@ -120,4 +120,4 @@ printf 'SHTORY_HOSTNAME=filehost\n' > "$H3/.shtory/shtory.env"
 printf 'envfile cmd\n' > "$T/hook3.sh"
 ( HOME=$H3 TERM=dumb bash -i < "$T/hook3.sh" >/dev/null 2>&1 )
 F3=$H3/.shtory/filehost.jsonl
-[[ -f $F3 && $(wc -l < "$F3") == 1 ]] && ok "env file host used by hook" || bad "env file host used by hook ($(jq -r .c "$F3" 2>/dev/null | tr '\n' '|'))"
+[[ -f $F3 && $(nl "$F3") == 1 ]] && ok "env file host used by hook" || bad "env file host used by hook ($(jq -r .c "$F3" 2>/dev/null | tr '\n' '|'))"

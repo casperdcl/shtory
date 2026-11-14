@@ -35,6 +35,9 @@ env -i PATH="$PATH" HOME="$home" HOSTNAME="$h" bash -c "$cmd"
 EOF
 cat > "$SHIM/rsync" <<'EOF'
 #!/usr/bin/env bash
+# portable stat (GNU -c / BSD -f)
+sz() { stat -c %s -- "$1" 2>/dev/null || stat -f %z -- "$1"; }
+mt() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
 args=("$@")
 src_arg=''; has_dd=0
 for a in "${args[@]}"; do
@@ -44,15 +47,15 @@ for a in "${args[@]}"; do
 done
 # pull: no '--', host:src present; push: files after '--'
 if [[ $has_dd -eq 0 && -n $src_arg ]]; then
-  h=${src_arg%%:*}; dest=${args[-1]}; n=0; m=0
+  h=${src_arg%%:*}; dest=${args[$((${#args[@]} - 1))]}; n=0; m=0
   src="$FAKE_REMOTE/$h"; [[ -d $src ]] || src=$FAKE_REMOTE
   for f in "$src"/.shtory/*.jsonl; do
     [[ -e $f ]] || continue
     m=$((m + 1))
     b=${f##*/}; d="$dest/$b"
     # model rsync quick check: skip when size + mtime match
-    if [[ -f $d && $(stat -c %s -- "$f") -eq $(stat -c %s -- "$d") \
-      && $(stat -c %Y -- "$f") -eq $(stat -c %Y -- "$d") ]]; then
+    if [[ -f $d && $(sz "$f") -eq $(sz "$d") \
+      && $(mt "$f") -eq $(mt "$d") ]]; then
       continue
     fi
     cp -p "$f" "$dest/" && n=$((n + 1))
@@ -66,15 +69,15 @@ fi
 i=0
 while [[ ${args[i]-} != -- && $i -lt ${#args[@]} ]]; do i=$((i + 1)); done
 [[ ${args[i]-} == -- ]] || exit 1
-h=${args[-1]%%:*}
+h=${args[$((${#args[@]} - 1))]%%:*}
 dest=$FAKE_REMOTE
 [[ -d $dest/$h ]] && dest=$dest/$h
 mkdir -p "$dest/.shtory"
 files=("${args[@]:i + 1: ${#args[@]} - i - 2}")
 for f in "${files[@]}"; do
   b=${f##*/}; d="$dest/.shtory/$b"
-  if [[ -f $d && $(stat -c %s -- "$f") -eq $(stat -c %s -- "$d") \
-    && $(stat -c %Y -- "$f") -eq $(stat -c %Y -- "$d") ]]; then
+  if [[ -f $d && $(sz "$f") -eq $(sz "$d") \
+    && $(mt "$f") -eq $(mt "$d") ]]; then
     continue
   fi
   cp -p "$f" "$dest/.shtory/"
@@ -95,15 +98,15 @@ printf 'fakeA\nfakeB\n' > "$T/ssh_hosts"
 )
 assert_eq "merged union, t-sorted" $'{"t":200,"d":"/x","e":0,"c":"onA"}\n{"t":300,"d":"/a","e":0,"c":"shared"}\n{"t":400,"d":"/y","e":1,"c":"remote-only"}' \
   "$(cat "$L/.shtory/fakeA.jsonl")"
-[[ $(stat -c %a "$L/.shtory/fakeA.jsonl") == 600 ]] && ok "sync merge preserves mode 600" || bad "sync merge preserves mode 600 ($(stat -c %a "$L/.shtory/fakeA.jsonl"))"
+[[ $(fmode "$L/.shtory/fakeA.jsonl") == 600 ]] && ok "sync merge preserves mode 600" || bad "sync merge preserves mode 600 ($(fmode "$L/.shtory/fakeA.jsonl"))"
 assert_eq "missing file pulled" '{"t":50,"d":"/z","e":0,"c":"fromB"}' "$(cat "$L/.shtory/fakeB.jsonl")"
 [[ -f $R/.shtory/localhost.jsonl ]] && ok "local-only pushed to remote" || bad "local-only pushed to remote"
-md5sum "$L"/.shtory/*.jsonl > "$T/m1"
+cksum "$L"/.shtory/*.jsonl > "$T/m1"
 (
   HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts SHTORY_HOSTNAME=me \
     PATH="$SHIM:$PATH" "$B" sync
 ) >/dev/null 2>&1
-md5sum "$L"/.shtory/*.jsonl > "$T/m2"
+cksum "$L"/.shtory/*.jsonl > "$T/m2"
 if diff -q "$T/m1" "$T/m2" >/dev/null; then ok "idempotent"; else bad "idempotent"; fi
 out=$(
   HOME=$L FAKE_REMOTE=$R FAKE_SSH_HOSTS=$T/ssh_hosts PATH="$SHIM:$PATH" \
@@ -207,7 +210,7 @@ L5=$T/name_home; R5=$T/name_remote
 mkdir -p "$L5/.shtory" "$R5/alx/.shtory"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-only"}' > "$L5/.shtory/realhost.jsonl"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-only"}' > "$R5/alx/.shtory/realhost.jsonl"
-touch -d '2020-01-01' "$R5/alx/.shtory/realhost.jsonl"   # same size, different content: force mtime mismatch
+touch -d '2020-01-01'  2>/dev/null || touch -t 202001010000 "$R5/alx/.shtory/realhost.jsonl"   # same size, different content: force mtime mismatch
 printf '%s\n' '{"t":5,"d":"/z","e":0,"c":"other2"}' > "$L5/.shtory/other2.jsonl"
 printf 'alx\n' > "$T/ssh_hosts6"
 printf 'SHTORY_HOSTNAME=realhost\n' > "$R5/alx/.shtory/shtory.env"
@@ -255,7 +258,7 @@ L6=$T/partial_home; R6=$T/partial_remote
 mkdir -p "$L6/.shtory" "$R6/part/.shtory"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":30,"d":"/x","e":0,"c":"local-extra"}' > "$L6/.shtory/part.jsonl"
 printf '%s\n' '{"t":10,"d":"/x","e":0,"c":"shared"}' '{"t":20,"d":"/x","e":0,"c":"remote-extra"}' > "$R6/part/.shtory/part.jsonl"
-touch -d '2020-01-01' "$R6/part/.shtory/part.jsonl"   # same size, different content: force mtime mismatch
+touch -d '2020-01-01'  2>/dev/null || touch -t 202001010000 "$R6/part/.shtory/part.jsonl"   # same size, different content: force mtime mismatch
 printf 'part\n' > "$T/ssh_hosts7"
 printf 'part\n' > "$T/partial_hosts"
 out=$(

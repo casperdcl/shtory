@@ -22,3 +22,15 @@ assert_rc(){ # desc expected_rc actual_rc
 }
 shtory_fn() { bash -c "source \"$B\" >/dev/null 2>&1; $*"; }
 tui_fn() { bash -c "source \"$TUI\" >/dev/null 2>&1; $*"; }
+# portable line count (BSD wc pads with leading spaces)
+nl() { wc -l < "$1" | tr -d '[:space:]'; }
+# portable stat (GNU stat -c vs BSD stat -f)
+fmode()  { stat -c %a -- "$1" 2>/dev/null || stat -f %Lp -- "$1"; }
+fsize()  { stat -c %s -- "$1" 2>/dev/null || stat -f %z -- "$1"; }
+fmtime() { stat -c %Y -- "$1" 2>/dev/null || stat -f %m -- "$1"; }
+# run $@ in a new session with no controlling tty (stats width);
+# setsid(1) is Linux-only, fall back to perl's POSIX::setsid
+detach() {
+  if command -v setsid >/dev/null 2>&1; then setsid "$@"
+  else perl -MPOSIX -e 'setsid(); exec @ARGV' "$@"; fi
+}

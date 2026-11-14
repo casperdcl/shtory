@@ -80,20 +80,17 @@ __shtory_log() {
   re='^[[:space:]]*([0-9]+)[[:space:]]*[*]?[[:space:]]*(.+)$'
   # something earlier in PROMPT_COMMAND may have clobbered $? but saved it in __bp_last_ret_value
   h1=$(builtin history 1 2>/dev/null) || return 0
-  [[ $h1 =~ $re ]] || return 0
-  # prompt appearing while user typing (input latency):
-  # history 1 shows unexecuted line with stale status;
-  # skip it (logged at the next prompt).
-  (( ${BASH_REMATCH[1]} > HISTCMD )) && return 0
-  # grows only on new commands, respecting HISTCONTROL;
-  # last entry's index is the list length;
-  # non-empty HISTFILE at first prompt means list came from re-read (not from user)
-  n=${BASH_REMATCH[1]}
+  n=0
+  [[ $h1 =~ $re ]] && n=${BASH_REMATCH[1]}
+  # n: list length; grows per command (HISTCONTROL respected),
+  # so log the last entry only when the list grew since the previous prompt.
+  # At first prompt, may only hold re-read (HISTFILE) or read-ahead (not yet executed) lines: never logged.
   if [[ -z ${__shtory_last_listlen-} ]]; then
-    [[ -s ${HISTFILE:-$HOME/.bash_history} ]] && __shtory_last_listlen=$n || __shtory_last_listlen=$((n - 1))
+    __shtory_last_listlen=$n
+    return 0
   fi
   # list shrank (history -c/-d restarted numbering): re-baseline
-  (( n < __shtory_last_listlen )) && __shtory_last_listlen=$((n - 1))
+  (( n < __shtory_last_listlen )) && __shtory_last_listlen=$n
   (( n <= __shtory_last_listlen )) && return 0
   __shtory_last_listlen=$n
   cmd=${BASH_REMATCH[2]}
@@ -112,7 +109,7 @@ __shtory_log() {
   d=${d//\"/\\\"}
   # creation: dir 0700, file 0600
   [[ -f $f ]] || { (umask 077; mkdir -p "$HOME/.shtory" 2>/dev/null; : >> "$f") 2>/dev/null || true; }
-  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "${EPOCHSECONDS:-$(date +%s)}" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
   return 0
 }
 if [[ ${PROMPT_COMMAND-} == *__shtory_log* ]]; then :;
@@ -305,7 +302,8 @@ remove_block() { # $1 = rcfile (rewrite in place, preserving permissions)
     { if (have) print prev; prev = $0; have = 1 }
     END { if (have && !skip) print prev }
   ' "$rcfile" > "$tmp"
-  chmod --reference="$rcfile" "$tmp" 2>/dev/null || true
+  mode=$(stat -c %a "$rcfile" 2>/dev/null || stat -f %Lp "$rcfile" 2>/dev/null)
+  [[ -n $mode ]] && chmod "$mode" "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$rcfile"
 }
 
@@ -343,7 +341,7 @@ import_history() {
          | [inputs | select(length > 0)]
          | reduce .[] as $c ({}; if ($exset[$c]) or (.[ $c ]) then . else .[$c] = true end)
          | keys_unsorted | .[] | {t:0,d:"",e:0,c:.}' > "$tmp"; then
-    n=$(wc -l < "$tmp")
+    n=$(wc -l < "$tmp" | tr -d '[:space:]')
     # stale imports: drop t:0 commands which now exist as t:!=0
     if [[ -f $f ]]; then
       tmp2=$(mktemp)
@@ -467,6 +465,17 @@ end
 # shared jq args for query/fzf_rows; uses $cwd $efilter $limit
 jq_reset_args() { jqargs=(--arg d "$cwd" --arg e "$efilter" --argjson n "$limit" --arg home "$HOME"); }
 
+# $1 <= $2
+ver_ge() {
+  awk -v a="$1" -v b="$2" '
+    BEGIN { n = split(a, A, "."); m = split(b, B, ".")
+      for (i = 1; i <= (n > m ? n : m); i++) {
+        x = (i <= n ? A[i] : 0) + 0; y = (i <= m ? B[i] : 0) + 0
+        if (x > y) exit 1
+        if (x < y) exit 0
+      } exit 0 }' >/dev/null
+}
+
 query() {
   local q=$1 mode=$2 msg='search'
   command -v fzf >/dev/null 2>&1 || msg="install \`fzf\` to make this search quicker"
@@ -483,9 +492,9 @@ fzf_rows() {
   local f line t
   jq_reset_args
   while IFS=$'\t' read -r t f; do
-    tac "$f" | jq -Rr \
+    awk '{ a[NR] = $0 } END { for (i = NR; i > 0; i--) print a[i] }' "$f" | jq -Rr \
       --arg q '' --arg o none --arg mode rows --arg plain 1 \
-      "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}"
+      "${jqargs[@]}" --arg H "$(host_of "$f")" "${TILDE_JQ}${JQ_PROG}" || break
   done < <(
     for f in "${files[@]}"; do
       line=$(tail -n 1 "$f" 2>/dev/null)
@@ -510,7 +519,7 @@ search_loop() {
       continue
     fi
     local -a rows=()
-    mapfile -t rows <<< "$out"
+    while IFS= read -r l; do rows+=("$l"); done <<< "$out"
     for n in "${!rows[@]}"; do
       printf ' %2d  %s\n' "$((n + 1))" "${rows[n]//$'\t'/  }" >&2
     done
@@ -572,8 +581,7 @@ cmd_search() {
       picker_opts=(--scheme=history --info=inline-right --border=none --no-scrollbar)
       fzf_v=$(fzf --version 2>/dev/null | awk '{print $1}')
       # --freeze-left needs fzf>=0.67
-      [[ $(printf '%s\n0.67.0\n' "$fzf_v" | sort -V | head -n1) == 0.67.0 ]] \
-        && picker_opts+=(--freeze-left=1)
+      ver_ge 0.67.0 "$fzf_v" && picker_opts+=(--freeze-left=1)
     fi
   fi
   if [[ -z $limit ]]; then
@@ -765,8 +773,12 @@ cmd_sync() {
   tmpdir=$(mktemp -d) # global (EXIT trap on signal exit has no locals)
   trap 'rm -rf "${tmpdir-}"' EXIT
 
+  # host->reported-name map in a file (bash 3.2 has no associative arrays)
+  namesfile="$tmpdir/names"
+  : > "$namesfile"
+  name_of_get() { awk -F'\t' -v h="$1" '$1==h {print $2; exit}' "$namesfile"; }
+
   local -a pulled=() f
-  declare -A name_of=()
   for h in "${hosts[@]}"; do
     if ! ssh_config_host "$h"; then
       echo "shtory: skipping '$h' (not in ~/.ssh/config)" >&2
@@ -781,7 +793,7 @@ cmd_sync() {
       echo "shtory: $h: unreachable (skipped)" >&2
       continue
     fi
-    name_of[$h]=${name:-$h}
+    printf '%s\t%s\n' "$h" "${name:-$h}" >> "$namesfile"
     sync_pull "$h" "$tmpdir/$h" && pulled+=("$h")
   done
   if [[ ${#pulled[@]} -eq 0 ]]; then
@@ -797,9 +809,10 @@ cmd_sync() {
     shopt -u nullglob
   fi
   for h in "${pulled[@]}"; do
-    sync_push "$h" "${name_of[$h]}" "$self"
-    if [[ ${name_of[$h]} != "$h" ]]; then
-      echo "shtory: $h: synced (as ${name_of[$h]})"
+    rep=$(name_of_get "$h")
+    sync_push "$h" "$rep" "$self"
+    if [[ $rep != "$h" ]]; then
+      echo "shtory: $h: synced (as $rep)"
     else
       echo "shtory: $h: synced"
     fi
@@ -816,7 +829,8 @@ timeline_grid() {
     h=${rest%% *}; rest=${rest#* }
     first=${rest%% *}; rest=${rest#* }; last=${rest%%* }
     # per-bin counts over W-cell axis
-    mapfile -t cnt < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
+    cnt=()
+    while IFS= read -r v; do cnt+=("$v"); done < <(awk -v gs="$gstart" -v sp="$span" -v w="$W" '
       { b = (sp > 0) ? int(($1 - gs) * w / sp) : 0
         if (b >= w) b = w - 1
         c[b]++
@@ -907,11 +921,13 @@ stats_timeline() {
   fi
   # combine hosts for TOTAL row; then sort by recent use
   cat -- "$tmpd"/* > "$tmpd/total"
-  mapfile -t rows < <(printf '%s\n' "${rows[@]}" | sort -k4,4nr)
-  rows=("$tmpd/total TOTAL $gstart $gend $tn" "${rows[@]}")
+  local -a sorted=()
+  while IFS= read -r r; do sorted+=("$r"); done < <(printf '%s\n' "${rows[@]}" | sort -k4,4nr)
+  rows=("$tmpd/total TOTAL $gstart $gend $tn" "${sorted[@]}")
   span=$(( gend - gstart ))
-  s=$(date -u -d "@$gstart" +%Y-%m-%d)
-  e=$(date -u -d "@$gend" +%Y-%m-%d)
+  epochdate() { date -u -d "@$1" +%Y-%m-%d 2>/dev/null || date -u -r "$1" +%Y-%m-%d; }
+  s=$(epochdate "$gstart")
+  e=$(epochdate "$gend")
   # row width = name(namew) + 2sp + axis(W) + 2sp + count(wN) + 1sp + days(wD);
   # wN/wD must be known before W can be clamped to the terminal
   local r rest x
