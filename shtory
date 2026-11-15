@@ -72,7 +72,9 @@ hook_block_bash() {
 
 # >>> shtory >>>
 __shtory_log() {
-  local ec=${__bp_last_ret_value:-$?} h1 cmd esc d re f n
+  # flush mode (EXIT trap): $?=final shell status; __bp_last_ret_value maybe stale
+  local ec=$? h1 cmd esc d re f n
+  [[ ${1-} != flush ]] && ec=${__bp_last_ret_value:-$ec}
   # hostname: $SHTORY_HOSTNAME > ~/.shtory/shtory.env > $HOSTNAME; cached per shell
   if [[ -z ${SHTORY_HOSTNAME-} && -z ${__shtory_host-} && -f $HOME/.shtory/shtory.env ]]; then
     __shtory_host=$(grep ^SHTORY_HOSTNAME= "$HOME/.shtory/shtory.env" 2>/dev/null | tail -n1 | cut -d= -f2-)
@@ -97,6 +99,8 @@ __shtory_log() {
   cmd=${BASH_REMATCH[2]}
   [[ ${BASH_REMATCH[1]}:$cmd == "${__shtory_last_logged-}" ]] && return 0
   __shtory_last_logged="${BASH_REMATCH[1]}:$cmd"
+  # bare exit/logout in flush mode (shell closing - skip logging)
+  [[ ${1-} == flush && $cmd =~ ^(exit|logout)([[:space:]]+[0-9]+)?$ ]] && return 0
   if [[ -n ${SHTORY_SKIP-} ]] && [[ $cmd =~ ${SHTORY_SKIP} ]]; then
     return 0
   fi
@@ -181,6 +185,24 @@ if [[ $- == *i* ]]; then
     esac
   }
   complete -F _shtory shtory
+  # flush last command on shell exit (no prompt follows);
+  # chain existing EXIT trap, idempotent across re-sources
+  __shtory_prevtrap=$(trap -p EXIT)
+  case "$__shtory_prevtrap" in *__shtory_exit_flush*) __shtory_prevtrap='' ;; esac
+  __shtory_exit_flush() {
+    __shtory_log flush
+    local a=${__shtory_prevtrap-} act
+    if [[ -n $a ]]; then
+      # dequote & run $a (user's trap action)
+      a=${a#trap }
+      a=${a#-- }
+      a=${a% EXIT}
+      act=$(eval "printf '%s' $a")
+      eval "$act"
+    fi
+    return 0
+  }
+  trap __shtory_exit_flush EXIT
 fi
 # <<< shtory <<<
 EOF
@@ -214,14 +236,10 @@ __shtory_zshaddhistory() {
   fi
   __shtory_cmd=$cmd
 }
-__shtory_log() {
-  # $? is the last command's exit status: zsh restores it before each precmd hook
-  local ec=$?
-  local cmd=${__shtory_cmd-}
-  [[ -n $cmd ]] || return 0
-  unset __shtory_cmd
+# $1=cmd $2=exit code
+__shtory_write() {
   local esc d f t
-  esc=${cmd//\\/\\\\}
+  esc=${1//\\/\\\\}
   esc=${esc//\"/\\\"}
   esc=${esc//$'\n'/\\n}
   esc=${esc//$'\t'/\\t}
@@ -237,11 +255,31 @@ __shtory_log() {
   t=${EPOCHSECONDS:-$(date +%s)}
   # creation: dir 0700, file 0600
   [[ -f $f ]] || { (umask 077; mkdir -p "$HOME/.shtory" 2>/dev/null; : >> "$f") 2>/dev/null || true; }
-  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "$t" "$d" "$ec" "$esc" >> "$f" 2>/dev/null
+  printf '{"t":%s,"d":"%s","e":%s,"c":"%s"}\n' "$t" "$d" "$2" "$esc" >> "$f" 2>/dev/null
   return 0
+}
+__shtory_log() {
+  # $?=last command's exit status (restored by zsh before each precmd hook)
+  local ec=$?
+  local cmd=${__shtory_cmd-}
+  [[ -n $cmd ]] || return 0
+  unset __shtory_cmd
+  __shtory_write "$cmd" "$ec"
+}
+# flush pending commands on shell exit (precmd didn't run: no prompt follows);
+# a zshexit hook (not a trap) so user's zshexit hooks aren't clobbered
+__shtory_zshexit() {
+  local ec=$?
+  local cmd=${__shtory_cmd-}
+  [[ -n $cmd ]] || return 0
+  # bare exit/logout (shell closing - skip logging)
+  [[ $cmd =~ ^(exit|logout)([[:space:]]+[0-9]+)?$ ]] && return 0
+  unset __shtory_cmd
+  __shtory_write "$cmd" "$ec"
 }
 add-zsh-hook zshaddhistory __shtory_zshaddhistory
 add-zsh-hook precmd __shtory_log
+add-zsh-hook zshexit __shtory_zshexit
 __shtory_pick() {
   local sel
   zle -I # interrupt any pending widget (e.g. vi-mode char wait)

@@ -108,7 +108,37 @@ EOF
       | HOME=$ZP PATH="$ZP/bin" TERM=linux \
       pty_run "$(command -v zsh) -i" 2>/dev/null | tr -d '\r' )
     [[ $out == *"zsel two"* ]] && ok "pty: zsh ctrl-r widget inserts & runs" || bad "pty: zsh ctrl-r widget inserts & runs ($(lastline "$out"))"
+
+    # zsh exit flush: a pending command (precmd didn't run) is flushed by the zshexit hook
+    ZF=$T/zf_home; mkdir -p "$ZF/bin" "$ZF/.shtory"
+    for b in bash sh jq cat stty mkdir; do
+      p=$(command -v "$b") && ln -sf "$p" "$ZF/bin/$b"
+    done
+    SHELL=/usr/bin/zsh SHTORY_ZSHRC=$ZF/.zshrc HOME=$ZF "$B" install >/dev/null
+    rm -f "$ZF"/.shtory/*.jsonl
+    { sleep 0.3; printf 'echo a\n'; sleep 0.3; printf 'true && exit\n'; sleep 0.5; } \
+      | HOME=$ZF PATH="$ZF/bin" TERM=linux \
+      pty_run "$(command -v zsh) -i" >/dev/null 2>&1
+    assert_eq "zsh exit flush: compound ending in exit is logged once" \
+      $'echo a 0\ntrue && exit 0' "$(jq -r '"\(.c) \(.e)"' "$ZF"/.shtory/*.jsonl 2>/dev/null)"
   fi
+
+  # shell-exit flush: a command whose next action exits the shell is never logged
+  # (no prompt follows); the EXIT trap flushes it with the shell's final status
+  FX=$T/fx_home; mkdir -p "$FX"
+  SHTORY_BASHRC=$FX/.bashrc HOME=$FX "$B" install >/dev/null
+  fx_run() { # rest = commands (last one exits the shell); prints saved "c e" pairs
+    local line
+    rm -f "$FX"/.bash_history "$FX"/.shtory/*.jsonl
+    { for line in "$@"; do sleep 0.25; printf '%s\n' "$line"; done
+      sleep 0.25; } \
+      | SHELL=$NP/bash PATH=$NP HOME=$FX pty_run "bash -i" >/dev/null 2>&1
+    jq -r '"\(.c) \(.e)"' "$FX"/.shtory/*.jsonl 2>/dev/null
+  }
+  assert_eq "exit flush: compound ending in exit is logged once" \
+    $'echo a 0\ntrue && exit 0' "$(fx_run 'echo a' 'true && exit')"
+  assert_eq "exit flush: bare exit not logged, no double log" \
+    $'echo b 0' "$(fx_run 'echo b' 'exit')"
 
   # HISTCONTROL: the hook mirrors bash's history list, so ignoredups/ignorespace/
   # ignoreboth/erasedups are respected; input lines are spaced out (all-at-once
