@@ -8,6 +8,8 @@ Shell history the [UNIX way](https://en.wikipedia.org/wiki/Unix_philosophy): a s
 - interactive search
 - serverless efficient merge/sync via `rsync`/`ssh`
 
+![](.github/demo.svg)
+
 ## Subcommands
 
 ### install/update
