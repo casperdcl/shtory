@@ -736,17 +736,27 @@ merge_lines() {
 
 # union every pulled copy of each file with the local one; $1 = pull root
 sync_merge() {
-  local root=$1 f base tmp
-  local -a files=() parts=()
+  local root=$1 f base tmp p
+  local -a bases=() parts=()
   shopt -s nullglob
   for f in "$root"/*/*.jsonl; do
-    files+=("$f")
+    base=${f##*/}
+    case " ${bases[*]-} " in
+      *" $base "*) ;;
+      *) bases+=("$base") ;;
+    esac
   done
   shopt -u nullglob
-  for f in "${files[@]}"; do
-    base=${f##*/}
-    parts=("$root"/*/"$base")
-    [[ -f "$HOME/.shtory/$base" ]] && parts=("$HOME/.shtory/$base" "${parts[@]}")
+  for base in ${bases[@]+"${bases[@]}"}; do
+    # skip identical copies
+    parts=()
+    for p in "$root"/*/"$base"; do
+      [[ -f $p ]] || continue
+      cmp -s -- "$HOME/.shtory/$base" "$p" 2>/dev/null && continue
+      parts+=("$p")
+    done
+    [[ -f "$HOME/.shtory/$base" ]] && parts=("$HOME/.shtory/$base" ${parts[@]+"${parts[@]}"})
+    [[ ${#parts[@]} -gt 0 ]] || continue
     tmp=$(mktemp "$HOME/.shtory/$base.XXXXXX") # 0600, same dir so mv is atomic
     if { cat "${parts[@]}"; } | prog merge \
       | merge_lines "$tmpdir" 1 > "$tmp"; then

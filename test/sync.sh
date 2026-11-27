@@ -282,3 +282,17 @@ printf 'nt\n' > "$T/ssh_hosts9"
   PATH="$SHIM:$PATH" "$B" sync nt
 ) >/dev/null 2>&1
 if [[ -s $T/nt_log ]]; then bad "unchanged files not re-transferred ($(tr '\n' ' ' < "$T/nt_log"))"; else ok "unchanged files not re-transferred"; fi
+
+# sync: unchanged remote => merge runs on the local copy alone (still dedupes, trims stale t:0)
+L10=$T/sk_home; R10=$T/sk_remote
+mkdir -p "$L10/.shtory" "$R10/sk/.shtory"
+printf '%s\n' '{"t":1,"d":"/x","e":0,"c":"dup"}' '{"t":1,"d":"/x","e":0,"c":"dup"}' '{"t":0,"d":"","e":0,"c":"stale"}' '{"t":2,"d":"/x","e":0,"c":"stale"}' > "$L10/.shtory/sk.jsonl"
+cp -p "$L10/.shtory/sk.jsonl" "$R10/sk/.shtory/"   # identical size + mtime: no transfer
+printf 'sk\n' > "$T/ssh_hosts11"
+(
+  HOME=$L10 FAKE_REMOTE=$R10 FAKE_SSH_HOSTS=$T/ssh_hosts11 SHTORY_HOSTNAME=me \
+  PATH="$SHIM:$PATH" "$B" sync sk
+) >/dev/null 2>&1
+assert_eq "no transfer: local-only merge dedupes + trims stale t:0" \
+  $'{"t":1,"d":"/x","e":0,"c":"dup"}\n{"t":2,"d":"/x","e":0,"c":"stale"}' \
+  "$(cat "$L10/.shtory/sk.jsonl")"
